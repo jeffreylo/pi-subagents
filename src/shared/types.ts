@@ -815,6 +815,13 @@ interface ExtensionChainConfig {
 	};
 }
 
+export interface ProactiveSkillSubagentsConfig {
+	enabled?: boolean;
+	minReferences?: number;
+	maxRecommendations?: number;
+	preferredAgent?: string;
+}
+
 export interface ExtensionConfig {
 	asyncByDefault?: boolean;
 	forceTopLevelAsync?: boolean;
@@ -826,6 +833,7 @@ export interface ExtensionConfig {
 	worktreeSetupHook?: string;
 	worktreeSetupHookTimeoutMs?: number;
 	intercomBridge?: IntercomBridgeConfig;
+	proactiveSkillSubagents?: ProactiveSkillSubagentsConfig | false;
 }
 
 // ============================================================================

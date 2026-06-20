@@ -19,11 +19,15 @@ import {
 import { serializeAgent } from "./agent-serializer.ts";
 import { serializeChain, serializeJsonChain } from "./chain-serializer.ts";
 import { discoverAvailableSkills } from "./skills.ts";
-import type { Details } from "../shared/types.ts";
+import {
+	formatProactiveSkillSubagentRecommendations,
+	recommendProactiveSkillSubagents,
+} from "./proactive-skills.ts";
+import type { Details, ExtensionConfig } from "../shared/types.ts";
 
 type ManagementAction = "list" | "get" | "create" | "update" | "delete";
 type ManagementScope = "user" | "project";
-type ManagementContext = Pick<ExtensionContext, "cwd" | "modelRegistry">;
+type ManagementContext = Pick<ExtensionContext, "cwd" | "modelRegistry"> & { config?: ExtensionConfig };
 
 interface ManagementParams {
 	action?: string;
@@ -35,6 +39,14 @@ interface ManagementParams {
 
 function result(text: string, isError = false): AgentToolResult<Details> {
 	return { content: [{ type: "text", text }], isError, details: { mode: "management", results: [] } };
+}
+
+function discoverAvailableSkillsBestEffort(cwd: string): Array<{ name: string; description?: string }> {
+	try {
+		return discoverAvailableSkills(cwd);
+	} catch {
+		return [];
+	}
 }
 
 function parseCsv(value: string): string[] {
@@ -450,6 +462,12 @@ export function handleList(params: ManagementParams, ctx: ManagementContext): Ag
 	const agents = scopedAgents.filter((a) => !a.disabled);
 	const chains = d.chains.filter((c) => scope === "both" || c.source === "package" || c.source === scope).sort((a, b) => a.name.localeCompare(b.name));
 	const diagnostics = d.chainDiagnostics.filter((entry) => scope === "both" || entry.source === scope);
+	const proactiveSuggestions = formatProactiveSkillSubagentRecommendations(recommendProactiveSkillSubagents({
+		agents,
+		chains,
+		availableSkills: discoverAvailableSkillsBestEffort(ctx.cwd),
+		config: ctx.config?.proactiveSkillSubagents,
+	}));
 	const lines = [
 		"Executable agents:",
 		...(agents.length
@@ -458,6 +476,7 @@ export function handleList(params: ManagementParams, ctx: ManagementContext): Ag
 		"",
 		"Chains:",
 		...(chains.length ? chains.map((c) => `- ${c.name} (${c.source}): ${c.description}`) : ["- (none)"]),
+		...(proactiveSuggestions.length ? ["", ...proactiveSuggestions] : []),
 		...(diagnostics.length ? ["", "Chain diagnostics:", ...diagnostics.map((entry) => `- ${entry.filePath}: ${entry.error}`)] : []),
 	];
 	return result(lines.join("\n"));
