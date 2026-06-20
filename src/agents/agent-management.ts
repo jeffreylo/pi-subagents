@@ -273,6 +273,12 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 		else if (typeof cfg.extensions === "string") target.extensions = parseCsv(cfg.extensions);
 		else return "config.extensions must be a comma-separated string, empty string, or false when provided.";
 	}
+	if (hasKey(cfg, "subagentOnlyExtensions")) {
+		if (cfg.subagentOnlyExtensions === false) target.subagentOnlyExtensions = undefined;
+		else if (cfg.subagentOnlyExtensions === "") target.subagentOnlyExtensions = [];
+		else if (typeof cfg.subagentOnlyExtensions === "string") target.subagentOnlyExtensions = parseCsv(cfg.subagentOnlyExtensions);
+		else return "config.subagentOnlyExtensions must be a comma-separated string, empty string, or false when provided.";
+	}
 	if (hasKey(cfg, "thinking")) {
 		if (cfg.thinking === false || cfg.thinking === "") target.thinking = undefined;
 		else if (typeof cfg.thinking === "string") target.thinking = cfg.thinking.trim() || undefined;
@@ -385,6 +391,7 @@ function formatAgentDetail(agent: AgentConfig): string {
 	if (agent.defaultContext) lines.push(`Default context: ${agent.defaultContext}`);
 	if (agent.source === "builtin") lines.push(`Disabled: ${agent.disabled ? "true" : "false"}`);
 	if (agent.extensions !== undefined) lines.push(`Extensions: ${agent.extensions.length ? agent.extensions.join(", ") : "(none)"}`);
+	if (agent.subagentOnlyExtensions !== undefined) lines.push(`Subagent-only extensions: ${agent.subagentOnlyExtensions.length ? agent.subagentOnlyExtensions.join(", ") : "(none)"}`);
 	if (agent.thinking) lines.push(`Thinking: ${agent.thinking}`);
 	if (agent.output) lines.push(`Output: ${agent.output}`);
 	if (agent.defaultReads?.length) lines.push(`Reads: ${agent.defaultReads.join(", ")}`);

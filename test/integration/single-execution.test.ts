@@ -1099,6 +1099,24 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.ok(extensionArgs.includes("./allowed-ext.ts"));
 	});
 
+	it("passes subagent-only extensions through to child execution", async () => {
+		mockPi.onCall({ output: "Done" });
+		const agents = [makeAgent("echo", {
+			tools: ["read"],
+			subagentOnlyExtensions: ["./child-only-tool.ts"],
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "subagent-only-extension",
+		});
+
+		assert.equal(result.exitCode, 0);
+		const args = readCallArgs();
+		const extensionArgs = args.filter((arg, index) => args[index - 1] === "--extension");
+		assert.ok(extensionArgs.some((arg) => arg.endsWith(path.join("src", "runs", "shared", "subagent-prompt-runtime.ts"))));
+		assert.ok(extensionArgs.includes("./child-only-tool.ts"));
+	});
+
 	it("treats forced drain after final assistant output as cleanup success", async () => {
 		mockPi.onCall({
 			jsonl: [events.assistantMessage("done-before-drain")],

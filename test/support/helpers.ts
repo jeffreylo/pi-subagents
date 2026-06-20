@@ -49,6 +49,7 @@ interface AgentConfig {
 	fallbackModels?: string[];
 	tools?: string[];
 	extensions?: string[];
+	subagentOnlyExtensions?: string[];
 	skills?: string[];
 	thinking?: string;
 	systemPromptMode?: string;

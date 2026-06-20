@@ -550,6 +550,44 @@ Do work
 	});
 });
 
+describe("agent frontmatter subagentOnlyExtensions", () => {
+	it("serializes subagentOnlyExtensions into agent frontmatter", () => {
+		const agent: AgentConfig = {
+			name: "worker",
+			description: "Worker",
+			systemPrompt: "Do work",
+			systemPromptMode: "replace",
+			inheritProjectContext: false,
+			inheritSkills: false,
+			source: "project",
+			filePath: "/tmp/worker.md",
+			subagentOnlyExtensions: ["./tools/child-search.ts", "/opt/pi/child-only.ts"],
+		};
+
+		const serialized = serializeAgent(agent);
+		assert.match(serialized, /subagentOnlyExtensions: \.\/tools\/child-search\.ts, \/opt\/pi\/child-only\.ts/);
+	});
+
+	it("parses subagentOnlyExtensions from discovered agent frontmatter", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-child-ext-"));
+		tempDirs.push(dir);
+		const agentsDir = path.join(dir, ".pi", "agents");
+		fs.mkdirSync(agentsDir, { recursive: true });
+		fs.writeFileSync(path.join(agentsDir, "worker.md"), `---
+name: worker
+description: Worker
+subagentOnlyExtensions: ./tools/child-search.ts, /opt/pi/child-only.ts
+---
+
+Do work
+`, "utf-8");
+
+		const result = discoverAgents(dir, "project");
+		const worker = result.agents.find((agent) => agent.name === "worker");
+		assert.deepEqual(worker?.subagentOnlyExtensions, ["./tools/child-search.ts", "/opt/pi/child-only.ts"]);
+	});
+});
+
 describe("agent frontmatter prompt assembly defaults", () => {
 	it("defaults ordinary agents to replace mode with no inherited context or skills", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-default-prompt-settings-"));

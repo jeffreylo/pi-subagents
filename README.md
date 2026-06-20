@@ -424,6 +424,7 @@ package: code-analysis
 description: Fast codebase recon
 tools: read, grep, find, ls, bash, mcp:chrome-devtools
 extensions:
+subagentOnlyExtensions: ./tools/child-only-search.ts
 model: claude-haiku-4-5
 fallbackModels: openai/gpt-5-mini, anthropic/claude-sonnet-4
 thinking: high
@@ -449,6 +450,7 @@ Important fields:
 | `package` | Optional package identifier. A file with `name: scout` and `package: code-analysis` registers as `code-analysis.scout`; serialization keeps `name` and `package` separate. |
 | `tools` | Builtin tool allowlist. `mcp:` entries select direct MCP tools when `pi-mcp-adapter` is installed. |
 | `extensions` | Omitted means normal extensions; empty means no extensions; comma-separated values allowlist specific extensions. |
+| `subagentOnlyExtensions` | Comma-separated extension paths loaded only in spawned child sessions for this agent. Tools registered there are unavailable to the main agent unless also installed through normal Pi extension configuration. |
 | `model` | Default model. Bare ids prefer the current provider when possible, then unique registry matches. |
 | `fallbackModels` | Ordered backup models for provider/model failures such as quota, auth, timeout, or unavailable model. Ordinary task failures do not trigger fallback. |
 | `thinking` | Appended as a `:level` suffix at runtime unless a suffix is already present. |
@@ -490,6 +492,8 @@ extensions: /abs/path/to/ext-a.ts, /abs/path/to/ext-b.ts
 ```
 
 When `extensions` is present, it takes precedence over extension paths implied by `tools` entries.
+
+Use `subagentOnlyExtensions` when a custom extension tool should exist only inside child sessions. It is scoped by agent config: every run of that agent receives those extension paths, while other agents do not unless they declare the same field. The current model does not have a separate named-subagent audience inside one agent definition.
 
 ## Chain files
 

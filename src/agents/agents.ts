@@ -47,6 +47,7 @@ export interface BuiltinAgentOverrideBase {
 	skills?: string[];
 	tools?: string[];
 	mcpDirectTools?: string[];
+	subagentOnlyExtensions?: string[];
 	completionGuard?: boolean;
 }
 
@@ -62,6 +63,7 @@ interface BuiltinAgentOverrideConfig {
 	systemPrompt?: string;
 	skills?: string[] | false;
 	tools?: string[] | false;
+	subagentOnlyExtensions?: string[] | false;
 	completionGuard?: boolean;
 }
 
@@ -90,6 +92,7 @@ export interface AgentConfig {
 	filePath: string;
 	skills?: string[];
 	extensions?: string[];
+	subagentOnlyExtensions?: string[];
 	output?: string;
 	defaultReads?: string[];
 	defaultProgress?: boolean;
@@ -457,6 +460,7 @@ function cloneOverrideBase(agent: AgentConfig): BuiltinAgentOverrideBase {
 		skills: agent.skills ? [...agent.skills] : undefined,
 		tools: agent.tools ? [...agent.tools] : undefined,
 		mcpDirectTools: agent.mcpDirectTools ? [...agent.mcpDirectTools] : undefined,
+		subagentOnlyExtensions: agent.subagentOnlyExtensions ? [...agent.subagentOnlyExtensions] : undefined,
 		completionGuard: agent.completionGuard,
 	};
 }
@@ -476,6 +480,7 @@ function cloneOverrideValue(override: BuiltinAgentOverrideConfig): BuiltinAgentO
 		...(override.systemPrompt !== undefined ? { systemPrompt: override.systemPrompt } : {}),
 		...(override.skills !== undefined ? { skills: override.skills === false ? false : [...override.skills] } : {}),
 		...(override.tools !== undefined ? { tools: override.tools === false ? false : [...override.tools] } : {}),
+		...(override.subagentOnlyExtensions !== undefined ? { subagentOnlyExtensions: override.subagentOnlyExtensions === false ? false : [...override.subagentOnlyExtensions] } : {}),
 		...(override.completionGuard !== undefined ? { completionGuard: override.completionGuard } : {}),
 	};
 }
@@ -635,6 +640,9 @@ function parseBuiltinOverrideEntry(
 	const tools = parseOverrideStringArrayOrFalse(input.tools, { filePath, name, field: "tools" });
 	if (tools !== undefined) override.tools = tools;
 
+	const subagentOnlyExtensions = parseOverrideStringArrayOrFalse(input.subagentOnlyExtensions, { filePath, name, field: "subagentOnlyExtensions" });
+	if (subagentOnlyExtensions !== undefined) override.subagentOnlyExtensions = subagentOnlyExtensions;
+
 	return Object.keys(override).length > 0 ? override : undefined;
 }
 
@@ -693,6 +701,9 @@ function applyBuiltinOverride(
 		next.tools = tools;
 		next.mcpDirectTools = mcpDirectTools;
 	}
+	if (override.subagentOnlyExtensions !== undefined) {
+		next.subagentOnlyExtensions = override.subagentOnlyExtensions === false ? undefined : [...override.subagentOnlyExtensions];
+	}
 	if (override.completionGuard !== undefined) next.completionGuard = override.completionGuard;
 
 	return next;
@@ -733,7 +744,7 @@ function applyBuiltinOverrides(
 
 export function buildBuiltinOverrideConfig(
 	base: BuiltinAgentOverrideBase,
-	draft: Pick<AgentConfig, "model" | "fallbackModels" | "thinking" | "systemPromptMode" | "inheritProjectContext" | "inheritSkills" | "defaultContext" | "disabled" | "systemPrompt" | "skills" | "tools" | "mcpDirectTools" | "completionGuard">,
+	draft: Pick<AgentConfig, "model" | "fallbackModels" | "thinking" | "systemPromptMode" | "inheritProjectContext" | "inheritSkills" | "defaultContext" | "disabled" | "systemPrompt" | "skills" | "tools" | "mcpDirectTools" | "subagentOnlyExtensions" | "completionGuard">,
 ): BuiltinAgentOverrideConfig | undefined {
 	const override: BuiltinAgentOverrideConfig = {};
 
@@ -751,6 +762,9 @@ export function buildBuiltinOverrideConfig(
 	const baseTools = joinToolList(base);
 	const draftTools = joinToolList(draft);
 	if (!arraysEqual(draftTools, baseTools)) override.tools = draftTools ? [...draftTools] : false;
+	if (!arraysEqual(draft.subagentOnlyExtensions, base.subagentOnlyExtensions)) {
+		override.subagentOnlyExtensions = draft.subagentOnlyExtensions ? [...draft.subagentOnlyExtensions] : false;
+	}
 	if ((draft.completionGuard !== false) !== (base.completionGuard !== false)) {
 		override.completionGuard = draft.completionGuard !== false;
 	}
@@ -912,6 +926,13 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 				.map((e) => e.trim())
 				.filter(Boolean);
 		}
+		let subagentOnlyExtensions: string[] | undefined;
+		if (frontmatter.subagentOnlyExtensions !== undefined) {
+			subagentOnlyExtensions = frontmatter.subagentOnlyExtensions
+				.split(",")
+				.map((e) => e.trim())
+				.filter(Boolean);
+		}
 
 		const extraFields: Record<string, string> = {};
 		for (const [key, value] of Object.entries(frontmatter)) {
@@ -944,6 +965,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 			filePath,
 			skills: skills && skills.length > 0 ? skills : undefined,
 			extensions,
+			subagentOnlyExtensions,
 			output: frontmatter.output,
 			defaultReads: defaultReads && defaultReads.length > 0 ? defaultReads : undefined,
 			defaultProgress: frontmatter.defaultProgress === "true",

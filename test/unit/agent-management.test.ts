@@ -156,6 +156,23 @@ Inspect
 		assert.match(readText(result), /config\.completionGuard must be a boolean/);
 	});
 
+	it("creates agents with subagent-only extensions", () => {
+		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
+		const result = handleCreate(
+			{ config: { name: "child-tool-user", description: "Uses child tools", scope: "project", subagentOnlyExtensions: "./tools/child-only.ts, /opt/pi/child.ts" } },
+			ctx,
+		);
+
+		assert.equal(result.isError, false);
+		const filePath = path.join(tempDir, ".pi", "agents", "child-tool-user.md");
+		const content = fs.readFileSync(filePath, "utf-8");
+		assert.match(content, /^subagentOnlyExtensions: \.\/tools\/child-only\.ts, \/opt\/pi\/child\.ts$/m);
+
+		const got = handleManagementAction("get", { agent: "child-tool-user" }, ctx);
+		assert.equal(got.isError, false);
+		assert.match(readText(got), /Subagent-only extensions: \.\/tools\/child-only\.ts, \/opt\/pi\/child\.ts/);
+	});
+
 	it("updates JSON chain descriptions without rewriting them as markdown", () => {
 		const ctx = { cwd: tempDir, modelRegistry: { getAvailable: () => [] } };
 		const chainPath = path.join(tempDir, ".pi", "chains", "dynamic-review.chain.json");

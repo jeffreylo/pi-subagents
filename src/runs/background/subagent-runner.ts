@@ -660,6 +660,7 @@ async function runSingleStep(
 			inheritSkills: step.inheritSkills,
 			tools: step.tools,
 			extensions: step.extensions,
+			subagentOnlyExtensions: step.subagentOnlyExtensions,
 			systemPrompt: step.systemPrompt,
 			systemPromptMode: step.systemPromptMode,
 			mcpDirectTools: step.mcpDirectTools,
