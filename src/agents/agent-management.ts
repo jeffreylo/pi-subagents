@@ -511,51 +511,31 @@ function handleModels(params: ManagementParams, ctx: ManagementContext): AgentTo
 		const resolvedModel = resolveSubagentModelOverride(agent.model, currentModel, availableModels, preferredProvider);
 		const lines = [
 			"Builtin subagent model",
-			"",
 			`Agent: ${requestedAgent}`,
-			"Effective model:",
-			`  ${resolvedModel ?? "(unresolved)"}`,
-			`Source: ${formatModelSource(agent, currentModel)}`,
+			`Model: ${resolvedModel ?? "(unresolved)"}`,
+			`Source: ${formatModelSource(agent, currentModel)}${agent.disabled ? "; disabled" : ""}`,
 		];
-		if (agent.override) {
-			lines.push("Override file:");
-			lines.push(`  ${agent.override.path}`);
-		}
-		if (agent.model && resolvedModel && agent.model !== resolvedModel) {
-			lines.push("Requested model setting:");
-			lines.push(`  ${agent.model}`);
-		}
-		if (agent.disabled) lines.push("Disabled: true");
-		lines.push("Current session model:");
-		lines.push(`  ${currentModel ? `${currentModel.provider}/${currentModel.id}` : "(unavailable)"}`);
+		if (agent.override) lines.push(`Override file: ${agent.override.path}`);
+		if (agent.model && resolvedModel && agent.model !== resolvedModel) lines.push(`Requested model setting: ${agent.model}`);
+		lines.push(`Current session model: ${currentModel ? `${currentModel.provider}/${currentModel.id}` : "(unavailable)"}`);
 		return result(lines.join("\n"));
 	}
 
 	const lines = [
 		"Builtin subagent models",
-		"",
-		"Current session model:",
-		`  ${currentModel ? `${currentModel.provider}/${currentModel.id}` : "(unavailable)"}`,
+		`Current session model: ${currentModel ? `${currentModel.provider}/${currentModel.id}` : "(unavailable)"}`,
 		"",
 	];
 
 	for (const name of names) {
 		const agent = builtinByName.get(name);
 		if (!agent) {
-			lines.push(name);
-			lines.push("  model:");
-			lines.push("    (builtin definition not found)");
-			lines.push("  source: missing");
-			lines.push("");
+			lines.push(`${name} → (builtin definition not found) — missing`);
 			continue;
 		}
 		const resolvedModel = resolveSubagentModelOverride(agent.model, currentModel, availableModels, preferredProvider);
 		const source = `${formatModelSource(agent, currentModel)}${agent.disabled ? "; disabled" : ""}`;
-		lines.push(name);
-		lines.push("  model:");
-		lines.push(`    ${resolvedModel ?? "(unresolved)"}`);
-		lines.push(`  source: ${source}`);
-		lines.push("");
+		lines.push(`${name} → ${resolvedModel ?? "(unresolved)"} — ${source}`);
 	}
 
 	return result(lines.join("\n"));

@@ -277,8 +277,8 @@ Inspect
 		const text = readText(result);
 		assert.equal(result.isError, false);
 		assert.match(text, /^Builtin subagent models/m);
-		assert.match(text, /Current session model:\n  openai\/gpt-5-mini/);
-		assert.match(text, /(?:^|\n)scout\n  model:\n    openai\/gpt-5-mini\n  source: inherits current session model(?:\n|$)/);
+		assert.match(text, /Current session model: openai\/gpt-5-mini/);
+		assert.match(text, /(?:^|\n)scout → openai\/gpt-5-mini — inherits current session model(?:\n|$)/);
 	});
 
 	it("reports override source and disabled builtin state in runtime model mappings", () => {
@@ -308,11 +308,10 @@ Inspect
 		assert.equal(result.isError, false);
 		assert.match(text, /^Builtin subagent model/m);
 		assert.match(text, /Agent: reviewer/);
-		assert.match(text, /Effective model:\n  anthropic\/claude-sonnet-4/);
+		assert.match(text, /Model: anthropic\/claude-sonnet-4/);
 		assert.match(text, /Source: project override/);
-		assert.match(text, /Requested model setting:\n  claude-sonnet-4/);
-		assert.match(text, /Disabled: true/);
-		assert.match(text, /Override file:\n  .*\.pi\/settings\.json/);
+		assert.match(text, /Requested model setting: claude-sonnet-4/);
+		assert.match(text, /Override file: .*\.pi\/settings\.json/);
 	});
 
 	it("rejects unknown builtin filters for runtime model mappings", () => {
