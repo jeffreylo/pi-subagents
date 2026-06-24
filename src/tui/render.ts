@@ -231,8 +231,11 @@ function resultStatusLine(result: Details["results"][number], output: string): s
 	return "Done";
 }
 
-function resultGlyph(result: Details["results"][number], output: string, theme: Theme, running = result.progress?.status === "running", seed = progressRunningSeed(result.progress ?? result.progressSummary)): string {
-	if (running) return theme.fg("accent", runningGlyph(seed));
+function resultGlyph(result: Details["results"][number], output: string, theme: Theme, running = result.progress?.status === "running", seed = progressRunningSeed(result.progress ?? result.progressSummary), frame?: number): string {
+	if (running) {
+		if (frame !== undefined) return theme.fg("accent", runningGlyph((seed ?? 0) + frame));
+		return theme.fg("accent", runningGlyph(seed));
+	}
 	if (result.detached) return theme.fg("warning", "■");
 	if (result.interrupted) return theme.fg("warning", "■");
 	if (result.exitCode !== 0) return theme.fg("error", "✗");
@@ -1225,7 +1228,7 @@ export function renderWidget(ctx: ExtensionContext, jobs: AsyncJobState[]): void
 	ctx.ui.setWidget(WIDGET_KEY, buildWidgetComponent(jobs, ctx.ui.getToolsExpanded?.() ?? false));
 }
 
-function renderSingleCompact(d: Details, r: Details["results"][number], theme: Theme): Component {
+function renderSingleCompact(d: Details, r: Details["results"][number], theme: Theme, frame?: number): Component {
 	const output = r.truncation?.text || getSingleResultOutput(r);
 	const progress = r.progress || r.progressSummary;
 	const isRunning = r.progress?.status === "running";
@@ -1237,7 +1240,7 @@ function renderSingleCompact(d: Details, r: Details["results"][number], theme: T
 	const c = new Container();
 	const width = getTermWidth() - 4;
 	const modelDisplay = modelThinkingBadge(theme, r.model);
-	c.addChild(new Text(truncLine(`${resultGlyph(r, output, theme, isRunning)} ${theme.fg("toolTitle", theme.bold(r.agent))}${modelDisplay}${contextBadge}${stats ? ` ${theme.fg("dim", "·")} ${stats}` : ""}`, width), 0, 0));
+	c.addChild(new Text(truncLine(`${resultGlyph(r, output, theme, isRunning, undefined, frame)} ${theme.fg("toolTitle", theme.bold(r.agent))}${modelDisplay}${contextBadge}${stats ? ` ${theme.fg("dim", "·")} ${stats}` : ""}`, width), 0, 0));
 
 	if (isRunning && r.progress) {
 		const progressSnapshotNow = snapshotNowForProgress(r.progress);
@@ -1261,7 +1264,7 @@ function renderSingleCompact(d: Details, r: Details["results"][number], theme: T
 	return c;
 }
 
-function renderMultiCompact(d: Details, theme: Theme): Component {
+function renderMultiCompact(d: Details, theme: Theme, frame?: number): Component {
 	const hasRunning = d.progress?.some((p) => p.status === "running")
 		|| d.results.some((r) => r.progress?.status === "running")
 		|| workflowGraphHasStatus(d, ["running"]);
@@ -1287,7 +1290,7 @@ function renderMultiCompact(d: Details, theme: Theme): Component {
 	const itemTitle = multiLabel.itemTitle;
 	const stats = statJoin(theme, [multiLabel.headerLabel, formatProgressStats(theme, totalSummary)]);
 	const glyph = hasRunning
-		? theme.fg("accent", runningGlyph(runningSeed(progressRunningSeed(totalSummary), d.currentStepIndex)))
+		? theme.fg("accent", runningGlyph(frame !== undefined ? (runningSeed(progressRunningSeed(totalSummary), d.currentStepIndex) ?? 0) + frame : runningSeed(progressRunningSeed(totalSummary), d.currentStepIndex)))
 		: failed
 			? theme.fg("error", "✗")
 			: paused
@@ -1333,7 +1336,7 @@ function renderMultiCompact(d: Details, theme: Theme): Component {
 		const rPending = rProg && "status" in rProg && rProg.status === "pending";
 		const stepNumber = r.progress?.index !== undefined ? r.progress.index + 1 : progressFromArray?.index !== undefined ? progressFromArray.index + 1 : i + 1;
 		const stepStats = formatProgressStats(theme, rProg);
-		const glyph = rPending ? theme.fg("dim", "◦") : resultGlyph(r, output, theme, rRunning, progressRunningSeed(rProg));
+		const glyph = rPending ? theme.fg("dim", "◦") : resultGlyph(r, output, theme, rRunning, progressRunningSeed(rProg), frame);
 		const pendingLabel = rPending ? ` ${theme.fg("dim", "· pending")}` : "";
 		const stepLabel = resultRowLabel(d, multiLabel, i, stepNumber);
 		const line = `${glyph} ${stepLabel}: ${themeBold(theme, agentName)}${stepStats ? ` ${theme.fg("dim", "·")} ${stepStats}` : ""}${pendingLabel}`;
@@ -1360,6 +1363,7 @@ export function renderSubagentResult(
 	result: AgentToolResult<Details>,
 	options: { expanded: boolean },
 	theme: Theme,
+	frame?: number,
 ): Component {
 	const d = result.details;
 	if (!d || !d.results.length) {
@@ -1374,7 +1378,7 @@ export function renderSubagentResult(
 
 	if (d.mode === "single" && d.results.length === 1) {
 		const r = d.results[0];
-		if (!expanded) return renderSingleCompact(d, r, theme);
+		if (!expanded) return renderSingleCompact(d, r, theme, frame);
 		const isRunning = r.progress?.status === "running";
 		const icon = isRunning
 			? theme.fg("warning", "running")
@@ -1468,7 +1472,7 @@ export function renderSubagentResult(
 		return c;
 	}
 
-	if (!expanded) return renderMultiCompact(d, theme);
+	if (!expanded) return renderMultiCompact(d, theme, frame);
 
 	const hasRunning = d.progress?.some((p) => p.status === "running") 
 		|| d.results.some((r) => r.progress?.status === "running")
