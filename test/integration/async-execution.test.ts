@@ -24,24 +24,29 @@ interface AsyncExecutionResult {
 }
 
 interface AsyncResultPayload {
+	lifecycleArtifactVersion?: number;
 	success: boolean;
 	state?: string;
 	exitCode?: number;
 	sessionId?: string;
 	mode?: string;
 	summary?: string;
-	results: Array<{ output?: string; success?: boolean; error?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown } }>;
+	totalTokens?: { input: number; output: number; total: number };
+	totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
+	results: Array<{ output?: string; success?: boolean; error?: string; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown } }>;
 	outputs?: Record<string, { text?: string; structured?: unknown }>;
 	workflowGraph?: { nodes?: Array<{ kind?: string; label?: string; phase?: string; status?: string; error?: string; outputName?: string; structured?: boolean; children?: Array<{ label?: string; outputName?: string; itemKey?: string; status?: string; error?: string }> }> };
 }
 
 interface AsyncStatusPayload {
+	lifecycleArtifactVersion?: number;
 	sessionId?: string;
 	activityState?: string;
 	currentTool?: string;
 	currentPath?: string;
 	state?: string;
 	totalTokens?: { total: number };
+	totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
 	parallelGroups?: Array<{ start: number; count: number; stepIndex: number }>;
 	steps?: Array<{
 		label?: string;
@@ -57,6 +62,7 @@ interface AsyncStatusPayload {
 		model?: string;
 		thinking?: string;
 		tokens?: { total: number };
+		totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
 		acceptance?: { status?: string };
 	}>;
 }
@@ -1025,15 +1031,26 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		}
 
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
+		assert.equal(payload.lifecycleArtifactVersion, 1);
 		assert.equal(payload.success, true);
 		assert.equal(payload.results[0].model, "anthropic/claude-sonnet-4:low");
 		assert.deepEqual(payload.results[0].attemptedModels, ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:low"]);
 		assert.equal(payload.results[0].modelAttempts.length, 2);
+		assert.deepEqual(payload.results[0].totalCost, { inputTokens: 110, outputTokens: 55, costUsd: 0.011 });
+		assert.deepEqual(payload.totalCost, { inputTokens: 110, outputTokens: 55, costUsd: 0.011 });
 		const statusPayload = JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(statusPayload.lifecycleArtifactVersion, 1);
 		assert.equal(statusPayload.steps[0]?.model, "anthropic/claude-sonnet-4:low");
 		assert.equal(statusPayload.steps[0]?.thinking, "low");
 		assert.ok(statusPayload.totalTokens!.total > 0);
 		assert.ok(statusPayload.steps[0]?.tokens!.total > 0);
+		assert.deepEqual(statusPayload.steps[0]?.totalCost, { inputTokens: 110, outputTokens: 55, costUsd: 0.011 });
+		assert.deepEqual(statusPayload.totalCost, { inputTokens: 110, outputTokens: 55, costUsd: 0.011 });
+		const events = fs.readFileSync(path.join(asyncDir, "events.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+		assert.equal(events.find((event) => event.type === "subagent.run.started")?.lifecycleArtifactVersion, 1);
+		const completed = events.find((event) => event.type === "subagent.run.completed");
+		assert.equal(completed?.lifecycleArtifactVersion, 1);
+		assert.deepEqual(completed?.totalCost, { inputTokens: 110, outputTokens: 55, costUsd: 0.011 });
 		assert.match(fs.readFileSync(path.join(asyncDir, "output-0.log"), "utf-8"), /Recovered asynchronously/);
 		assert.equal(mockPi.callCount(), 2);
 	});

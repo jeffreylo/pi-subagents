@@ -35,6 +35,7 @@ import {
 	ASYNC_DIR,
 	RESULTS_DIR,
 	SUBAGENT_ASYNC_STARTED_EVENT,
+	SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 	TEMP_ROOT_DIR,
 	getAsyncConfigPath,
 	resolveChildMaxSubagentDepth,
@@ -749,6 +750,7 @@ export function executeAsyncChain(
 			}
 		}
 		ctx.pi.events.emit(SUBAGENT_ASYNC_STARTED_EVENT, {
+			lifecycleArtifactVersion: SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 			id,
 			pid: spawnResult.pid,
 			sessionId: ctx.currentSessionId,
@@ -966,6 +968,7 @@ export function executeAsyncSingle(
 			}
 		}
 		ctx.pi.events.emit(SUBAGENT_ASYNC_STARTED_EVENT, {
+			lifecycleArtifactVersion: SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 			id,
 			pid: spawnResult.pid,
 			sessionId: ctx.currentSessionId,

@@ -9,6 +9,7 @@
 - Added detached async runner stdout and stderr log files. Thanks to Daniel Mateos Carballares (@danim47c) for #358.
 - Added `totalCost` rollups to foreground single, parallel, and chain run details, including nested foreground subagent costs and compact progress display. Thanks to Clark Everson (@gr3enarr0w) for #345.
 - Added `globalConcurrencyLimit` to cap simultaneously running subagent tasks across parallel groups in a single run. Thanks to Clark Everson (@gr3enarr0w) for #349.
+- Added stable v1 async lifecycle artifact metadata in `status.json`, `events.jsonl`, and result JSON so observability and workflow gates can correlate subagent runs without scraping terminal output. Thanks to Clark Everson (@gr3enarr0w) for #350.
 - Added `PI_SUBAGENT_PI_BINARY` to let wrappers launch child agents through an explicit Pi binary instead of resolving `pi` from `PATH`. Thanks to David Barroso (@dbarrosop) for #341.
 - Added `worktreeBaseDir` and `PI_SUBAGENTS_WORKTREE_DIR` so worktree isolation can use a stable trusted base directory. Thanks to Matt Robenolt (@mattrobenolt) for #185.
 - Added `singleRunOutputBaseDir` so single-agent relative outputs can be routed to a configured artifact directory. Thanks to Oleksii Nikiforov (@NikiforovAll) for #173.
@@ -26,6 +27,7 @@
 - Include bounded async runner stderr tails when stale-run reconciliation marks a startup crash failed. Thanks to Salem Sayed (@salemsayed) for #340.
 - Persist forked child session files when Pi returns a branch path before writing it to disk. Thanks to @trisforrestcam for #174.
 - Pass explicit `thinking: off` through to child model arguments as a `:off` suffix. Thanks to Thomas Dietert (@tdietert) for #147.
+- Fail fork-context preflight clearly when the inherited transcript contains Anthropic signed `thinking` / `redacted_thinking` blocks that pi-subagents cannot safely preserve across session branching. Thanks to Thomas Dietert (@tdietert) for #147.
 - Restore queued and running detached async jobs into the widget after restarting Pi. Thanks to Vicary (@vicary) for #362.
 - Clarify that `timeoutMs` and `maxRuntimeMs` apply only to foreground subagent runs. Thanks to @pkese for #361.
 

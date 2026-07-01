@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AcceptanceLedger, AsyncStatus, ModelAttempt } from "../../shared/types.ts";
+import type { AcceptanceLedger, AsyncStatus, CostSummary, ModelAttempt } from "../../shared/types.ts";
 import { readStatus } from "../../shared/utils.ts";
 
 export interface ImportedAsyncRoot {
@@ -21,6 +21,7 @@ export interface ImportedAsyncRootResult {
 	model?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
+	totalCost?: CostSummary;
 	structuredOutput?: unknown;
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
@@ -41,6 +42,7 @@ interface AsyncResultFile {
 		model?: string;
 		attemptedModels?: string[];
 		modelAttempts?: ModelAttempt[];
+		totalCost?: CostSummary;
 		structuredOutput?: unknown;
 		structuredOutputPath?: string;
 		structuredOutputSchemaPath?: string;
@@ -96,6 +98,7 @@ function outputFromTerminalStatus(root: ImportedAsyncRoot, status: AsyncStatus, 
 		...(step?.model ? { model: step.model } : {}),
 		...(step?.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
 		...(step?.modelAttempts ? { modelAttempts: step.modelAttempts } : {}),
+		...(step?.totalCost ? { totalCost: step.totalCost } : {}),
 		...(step?.structuredOutput !== undefined ? { structuredOutput: step.structuredOutput } : {}),
 		...(step?.structuredOutputPath ? { structuredOutputPath: step.structuredOutputPath } : {}),
 		...(step?.structuredOutputSchemaPath ? { structuredOutputSchemaPath: step.structuredOutputSchemaPath } : {}),
@@ -122,6 +125,7 @@ function buildImportedResult(root: ImportedAsyncRoot, status: AsyncStatus | null
 		...(child?.model ?? step?.model ? { model: child?.model ?? step?.model } : {}),
 		...(child?.attemptedModels ?? step?.attemptedModels ? { attemptedModels: child?.attemptedModels ?? step?.attemptedModels } : {}),
 		...(child?.modelAttempts ?? step?.modelAttempts ? { modelAttempts: child?.modelAttempts ?? step?.modelAttempts } : {}),
+		...(child?.totalCost ?? step?.totalCost ? { totalCost: child?.totalCost ?? step?.totalCost } : {}),
 		...(child?.structuredOutput !== undefined ? { structuredOutput: child.structuredOutput } : step?.structuredOutput !== undefined ? { structuredOutput: step.structuredOutput } : {}),
 		...(child?.structuredOutputPath ?? step?.structuredOutputPath ? { structuredOutputPath: child?.structuredOutputPath ?? step?.structuredOutputPath } : {}),
 		...(child?.structuredOutputSchemaPath ?? step?.structuredOutputSchemaPath ? { structuredOutputSchemaPath: child?.structuredOutputSchemaPath ?? step?.structuredOutputSchemaPath } : {}),

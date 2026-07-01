@@ -15,6 +15,7 @@ import {
 	type AsyncParallelGroupStatus,
 	type AsyncStatus,
 	type ChainOutputMap,
+	type CostSummary,
 	type ModelAttempt,
 	type NestedRouteInfo,
 	type NestedRunSummary,
@@ -24,6 +25,7 @@ import {
 	type WorkflowGraphSnapshot,
 	DEFAULT_MAX_OUTPUT,
 	type MaxOutputConfig,
+	SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 	truncateOutput,
 	getSubagentDepthEnv,
 } from "../../shared/types.ts";
@@ -130,6 +132,7 @@ interface StepResult {
 	model?: string;
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
+	totalCost?: CostSummary;
 	artifactPaths?: ArtifactPaths;
 	truncated?: boolean;
 	structuredOutput?: unknown;
@@ -242,6 +245,21 @@ function tokenUsageFromAttempts(attempts: ModelAttempt[] | undefined): TokenUsag
 	}
 	const total = input + output;
 	return total > 0 ? { input, output, total } : null;
+}
+
+function costSummaryFromAttempts(attempts: ModelAttempt[] | undefined): CostSummary | undefined {
+	if (!attempts || attempts.length === 0) return undefined;
+	let inputTokens = 0;
+	let outputTokens = 0;
+	let costUsd = 0;
+	for (const attempt of attempts) {
+		inputTokens += attempt.usage?.input ?? 0;
+		outputTokens += attempt.usage?.output ?? 0;
+		costUsd += attempt.usage?.cost ?? 0;
+	}
+	return inputTokens > 0 || outputTokens > 0 || costUsd > 0
+		? { inputTokens, outputTokens, costUsd }
+		: undefined;
 }
 
 function appendRecentStepOutput(step: RunnerStatusStep, lines: string[]): void {
@@ -702,6 +720,7 @@ async function runSingleStep(
 			model: imported.model,
 			attemptedModels: imported.attemptedModels,
 			modelAttempts: imported.modelAttempts,
+			totalCost: imported.totalCost,
 			structuredOutput: imported.structuredOutput,
 			structuredOutputPath: imported.structuredOutputPath,
 			structuredOutputSchemaPath: imported.structuredOutputSchemaPath,
@@ -936,6 +955,7 @@ async function runSingleStep(
 		model: finalResult?.model,
 		attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 		modelAttempts,
+		totalCost: costSummaryFromAttempts(modelAttempts),
 		artifactPaths,
 		interrupted: finalResult?.interrupted,
 		completionGuardTriggered: completionGuardTriggeredFinal,
@@ -1156,6 +1176,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		|| shareEnabled
 		|| flatSteps.some((step) => Boolean(step.sessionFile));
 	const statusPayload: RunnerStatusPayload = {
+		lifecycleArtifactVersion: SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 		runId: id,
 		...(config.sessionId ? { sessionId: config.sessionId } : {}),
 		mode: config.resultMode ?? (flatSteps.length > 1 ? "chain" : "single"),
@@ -1616,6 +1637,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		eventsPath,
 		JSON.stringify({
 			type: "subagent.run.started",
+			lifecycleArtifactVersion: SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 			ts: overallStartTime,
 			runId: id,
 			mode: statusPayload.mode,
@@ -1836,6 +1858,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				statusPayload.steps[fi].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[fi].thinking);
 				statusPayload.steps[fi].attemptedModels = singleResult.attemptedModels;
 				statusPayload.steps[fi].modelAttempts = singleResult.modelAttempts;
+				statusPayload.steps[fi].totalCost = singleResult.totalCost;
 				statusPayload.steps[fi].error = singleResult.error;
 				statusPayload.steps[fi].structuredOutput = singleResult.structuredOutput;
 				statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
@@ -1867,6 +1890,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					model: pr.model,
 					attemptedModels: pr.attemptedModels,
 					modelAttempts: pr.modelAttempts,
+					totalCost: pr.totalCost,
 					artifactPaths: pr.artifactPaths,
 					structuredOutput: pr.structuredOutput,
 					structuredOutputPath: pr.structuredOutputPath,
@@ -2091,6 +2115,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.steps[fi].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[fi].thinking);
 						statusPayload.steps[fi].attemptedModels = singleResult.attemptedModels;
 						statusPayload.steps[fi].modelAttempts = singleResult.modelAttempts;
+						statusPayload.steps[fi].totalCost = singleResult.totalCost;
 						statusPayload.steps[fi].error = singleResult.error;
 						statusPayload.steps[fi].structuredOutput = singleResult.structuredOutput;
 						statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
@@ -2158,6 +2183,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						model: pr.model,
 						attemptedModels: pr.attemptedModels,
 						modelAttempts: pr.modelAttempts,
+						totalCost: pr.totalCost,
 						artifactPaths: pr.artifactPaths,
 							structuredOutput: pr.structuredOutput,
 							structuredOutputPath: pr.structuredOutputPath,
@@ -2257,6 +2283,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				model: singleResult.model,
 				attemptedModels: singleResult.attemptedModels,
 				modelAttempts: singleResult.modelAttempts,
+				totalCost: singleResult.totalCost,
 				artifactPaths: singleResult.artifactPaths,
 				structuredOutput: singleResult.structuredOutput,
 				structuredOutputPath: singleResult.structuredOutputPath,
@@ -2304,6 +2331,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.steps[flatIndex].thinking = resolveEffectiveThinking(singleResult.model, statusPayload.steps[flatIndex].thinking);
 			statusPayload.steps[flatIndex].attemptedModels = singleResult.attemptedModels;
 			statusPayload.steps[flatIndex].modelAttempts = singleResult.modelAttempts;
+			statusPayload.steps[flatIndex].totalCost = singleResult.totalCost;
 			statusPayload.steps[flatIndex].error = singleResult.error;
 			statusPayload.steps[flatIndex].structuredOutput = singleResult.structuredOutput;
 			statusPayload.steps[flatIndex].structuredOutputPath = singleResult.structuredOutputPath;
@@ -2361,6 +2389,12 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	}
 
 	const resultMode = config.resultMode ?? statusPayload.mode;
+	const totalCost = results.reduce<CostSummary>((sum, result) => ({
+		inputTokens: sum.inputTokens + (result.totalCost?.inputTokens ?? 0),
+		outputTokens: sum.outputTokens + (result.totalCost?.outputTokens ?? 0),
+		costUsd: sum.costUsd + (result.totalCost?.costUsd ?? 0),
+	}), { inputTokens: 0, outputTokens: 0, costUsd: 0 });
+	const finalTotalCost = totalCost.inputTokens > 0 || totalCost.outputTokens > 0 || totalCost.costUsd > 0 ? totalCost : undefined;
 	const finalFlatAgents = statusPayload.steps.map((step) => step.agent);
 	const agentName = finalFlatAgents.length === 1
 		? finalFlatAgents[0]!
@@ -2409,6 +2443,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	statusPayload.endedAt = runEndedAt;
 	statusPayload.lastUpdate = runEndedAt;
 	statusPayload.sessionFile = effectiveSessionFile;
+	statusPayload.totalCost = finalTotalCost;
 	statusPayload.shareUrl = shareUrl;
 	statusPayload.gistUrl = gistUrl;
 	statusPayload.shareError = shareError;
@@ -2423,10 +2458,13 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		eventsPath,
 		JSON.stringify({
 			type: "subagent.run.completed",
+			lifecycleArtifactVersion: SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 			ts: runEndedAt,
 			runId: id,
 			status: statusPayload.state,
 			durationMs: runEndedAt - overallStartTime,
+			totalTokens: statusPayload.totalTokens,
+			totalCost: finalTotalCost,
 		}),
 	);
 	writeRunLog(logPath, {
@@ -2450,6 +2488,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 
 	try {
 		writeAtomicJson(resultPath, {
+			lifecycleArtifactVersion: SUBAGENT_LIFECYCLE_ARTIFACT_VERSION,
 			id,
 			agent: agentName,
 			mode: resultMode,
@@ -2468,6 +2507,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				model: r.model,
 				attemptedModels: r.attemptedModels,
 				modelAttempts: r.modelAttempts,
+				totalCost: r.totalCost,
 				artifactPaths: r.artifactPaths,
 				truncated: r.truncated,
 				structuredOutput: r.structuredOutput,
@@ -2480,6 +2520,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			exitCode: interrupted || results.every((r) => r.success) ? 0 : 1,
 			timestamp: runEndedAt,
 			durationMs: runEndedAt - overallStartTime,
+			totalTokens: statusPayload.totalTokens,
+			totalCost: finalTotalCost,
 			truncated,
 			artifactsDir,
 			cwd,

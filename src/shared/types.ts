@@ -144,6 +144,8 @@ export interface ControlEvent {
 
 export type SubagentResultStatus = "completed" | "failed" | "paused" | "detached";
 export type SubagentRunMode = "single" | "parallel" | "chain";
+export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 1;
+export type SubagentLifecycleArtifactVersion = typeof SUBAGENT_LIFECYCLE_ARTIFACT_VERSION;
 
 export type PublicNestedStepSummary = Pick<
 	NestedStepSummary,
@@ -559,6 +561,7 @@ export interface NestedRouteInfo {
 }
 
 export interface AsyncStartedEvent {
+	lifecycleArtifactVersion?: SubagentLifecycleArtifactVersion;
 	id?: string;
 	asyncDir?: string;
 	pid?: number;
@@ -574,6 +577,7 @@ export interface AsyncStartedEvent {
 }
 
 export interface AsyncStatus {
+	lifecycleArtifactVersion?: SubagentLifecycleArtifactVersion;
 	runId: string;
 	sessionId?: string;
 	mode: SubagentRunMode;
@@ -624,6 +628,7 @@ export interface AsyncStatus {
 		thinking?: string;
 		attemptedModels?: string[];
 		modelAttempts?: ModelAttempt[];
+		totalCost?: CostSummary;
 		error?: string;
 		structuredOutput?: unknown;
 		structuredOutputPath?: string;
@@ -633,6 +638,7 @@ export interface AsyncStatus {
 	sessionDir?: string;
 	outputFile?: string;
 	totalTokens?: TokenUsage;
+	totalCost?: CostSummary;
 	sessionFile?: string;
 	outputs?: ChainOutputMap;
 }
