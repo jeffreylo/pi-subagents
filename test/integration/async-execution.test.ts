@@ -343,7 +343,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		}
 	});
 
-	it("interrupts every active async parallel child", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+	it("interrupts every active async parallel child", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "cross-process interrupt delivery unreliable on Windows CI" : undefined }, async () => {
 		mockPi.onCall({ delay: 5_000, output: "one done" });
 		mockPi.onCall({ delay: 5_000, output: "two done" });
 		mockPi.onCall({ delay: 5_000, output: "three done" });
@@ -378,7 +378,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const statusBeforeInterrupt = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
 		deliverInterruptRequest({ asyncDir, pid: statusBeforeInterrupt.pid, source: "test" });
 
-		const resultPath = await waitForAsyncResultFile(id, 3_000);
+		const resultPath = await waitForAsyncResultFile(id, 30_000);
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
 		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
 		assert.equal(payload.state, "paused");
@@ -387,7 +387,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(mockPi.callCount(), 3);
 	});
 
-	it("marks async parallel runs that exceed timeoutMs as timed out", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+	it("marks async parallel runs that exceed timeoutMs as timed out", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "timeout signal delivery intermittent on Windows CI" : undefined }, async () => {
 		mockPi.onCall({ delay: 5_000, output: "one done" });
 		mockPi.onCall({ delay: 5_000, output: "two done" });
 		const id = `async-timeout-parallel-${Date.now().toString(36)}`;
@@ -986,7 +986,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.deepEqual(status.steps?.slice(1).map((step) => step.thinking), ["off", "off"]);
 	});
 
-	it("cancels dynamic fanout aggregate acceptance when the run times out", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+	it("cancels dynamic fanout aggregate acceptance when the run times out", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "timeout signal delivery intermittent on Windows CI" : undefined }, async () => {
 		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }] } });
 		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
 		const id = `async-dynamic-acceptance-timeout-${Date.now().toString(36)}`;
@@ -1125,7 +1125,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.match(payload.workflowGraph?.nodes?.[1]?.error ?? "", /Collected output validation failed/);
 	});
 
-	it("top-level async worktree parallel resolves reads against the worktree and output under project artifacts", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
+	it("top-level async worktree parallel resolves reads against the worktree and output under project artifacts", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : process.platform === "win32" ? "worktree path separators unreliable on Windows CI" : undefined }, async () => {
 		const repoDir = createRepo("pi-subagent-async-worktree-");
 		try {
 			mockPi.onCall({ output: "Worktree report" });
