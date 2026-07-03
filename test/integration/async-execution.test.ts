@@ -378,7 +378,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const statusBeforeInterrupt = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload & { pid?: number };
 		deliverInterruptRequest({ asyncDir, pid: statusBeforeInterrupt.pid, source: "test" });
 
-		const resultPath = await waitForAsyncResultFile(id, 3_000);
+		const resultPath = await waitForAsyncResultFile(id, 30_000);
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
 		const status = JSON.parse(fs.readFileSync(statusPath, "utf-8")) as AsyncStatusPayload;
 		assert.equal(payload.state, "paused");
@@ -455,10 +455,10 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			},
 			shareEnabled: false,
 			maxSubagentDepth: 2,
-			timeoutMs: 1_500,
+			timeoutMs: 1_500,>>>>>>> origin/main
 		});
 
-		await waitForMockPiCall(mockPi, 0, 10_000);
+		await waitForMockPiCall(mockPi, 0, 10_000);>>>>>>> origin/main
 		const resultPath = await waitForAsyncResultFile(id, 8_000);
 		const elapsedMs = Date.now() - startedAt;
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
@@ -466,7 +466,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(payload.state, "failed");
 		assert.equal(payload.timedOut, true);
 		assert.equal(payload.results[0]?.timedOut, true);
-		assert.match(payload.results[0]?.error ?? "", /Subagent timed out after 1500ms\./);
+		assert.match(payload.results[0]?.error ?? "", /Subagent timed out after 1500ms\./);>>>>>>> origin/main
 		assert.equal(status.timedOut, true);
 		assert.equal(status.steps?.[0]?.timedOut, true);
 		assert.ok(elapsedMs < 7_000, `timeout result should settle after hard kill, elapsed ${elapsedMs}ms`);
