@@ -35,6 +35,12 @@ interface ForkableSessionManager {
 
 interface ForkContextResolverOptions {
 	openSession?: (path: string, sessionDir?: string) => BranchSessionManager;
+	/**
+	 * Directory where branched (forked) child sessions are created. When
+	 * omitted, the branched session lands in the parent's session directory,
+	 * which pollutes the top-level session history with subagent children.
+	 */
+	branchSessionDir?: string;
 }
 
 interface ForkContextResolution {
@@ -135,7 +141,7 @@ export function createForkContextResolver(
 	const openSession = options.openSession
 		?? sessionManager.openSession
 		?? ((file: string, dir?: string) => SessionManager.open(file, dir));
-	const sessionDir = sessionManager.getSessionDir?.();
+	const sessionDir = options.branchSessionDir ?? sessionManager.getSessionDir?.();
 	const cachedResolutions = new Map<number, ForkContextResolution>();
 
 	const resolveFork = (index = 0): ForkContextResolution => {
@@ -144,6 +150,11 @@ export function createForkContextResolver(
 		try {
 			if (!fs.existsSync(parentSessionFile)) {
 				throw new Error(`Parent session file does not exist: ${parentSessionFile}. Pi has not persisted enough history to fork yet.`);
+			}
+			// createBranchedSession writes into the session dir without creating
+			// it, so the resolver must guarantee the directory exists.
+			if (options.branchSessionDir) {
+				fs.mkdirSync(options.branchSessionDir, { recursive: true });
 			}
 			const sourceManager = openSession(parentSessionFile, sessionDir);
 			const sessionFile = sourceManager.createBranchedSession(leafId);

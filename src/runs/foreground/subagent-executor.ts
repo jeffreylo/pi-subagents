@@ -3476,15 +3476,6 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		);
 		if (validationError) return validationError;
 
-		let forkSessionFileForIndex: (idx?: number) => string | undefined = () => undefined;
-		let forkThinkingOverrideForIndex: (idx?: number) => AgentConfig["thinking"] | undefined = () => undefined;
-		try {
-			const forkContextResolver = createForkContextResolver(ctx.sessionManager, contextPolicy.usesFork ? "fork" : undefined);
-			forkSessionFileForIndex = forkContextResolver.sessionFileForIndex;
-			forkThinkingOverrideForIndex = forkContextResolver.thinkingOverrideForIndex;
-		} catch (error) {
-			return toExecutionErrorResult(effectiveParams, error);
-		}
 		const requestedAsync = effectiveParams.async ?? deps.asyncByDefault;
 		const backgroundRequestedWhileClarifying = (hasChain || hasTasks) && requestedAsync && effectiveParams.clarify === true;
 		const effectiveAsync = requestedAsync && effectiveParams.clarify !== true;
@@ -3513,6 +3504,23 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 				effectiveParams,
 				new Error(`Failed to create session directory '${sessionRoot}': ${message}`),
 			);
+		}
+		let forkSessionFileForIndex: (idx?: number) => string | undefined = () => undefined;
+		let forkThinkingOverrideForIndex: (idx?: number) => AgentConfig["thinking"] | undefined = () => undefined;
+		try {
+			// branchSessionDir keeps forked child sessions inside this run's
+			// session root instead of the parent's top-level session directory,
+			// where they would show up in session pickers and `pi -c`. The
+			// `forks` subdirectory keeps them apart from fresh-context
+			// `run-N/session.jsonl` children, including when the caller passes
+			// an explicit sessionDir.
+			const forkContextResolver = createForkContextResolver(ctx.sessionManager, contextPolicy.usesFork ? "fork" : undefined, {
+				branchSessionDir: path.join(sessionRoot, "forks"),
+			});
+			forkSessionFileForIndex = forkContextResolver.sessionFileForIndex;
+			forkThinkingOverrideForIndex = forkContextResolver.thinkingOverrideForIndex;
+		} catch (error) {
+			return toExecutionErrorResult(effectiveParams, error);
 		}
 		const sessionDirForIndex = (idx?: number) =>
 			path.join(sessionRoot, `run-${idx ?? 0}`);
