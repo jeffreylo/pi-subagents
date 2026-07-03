@@ -10,7 +10,7 @@ import registerSubagentNotify, {
 } from "../../src/runs/background/notify.ts";
 import { SUBAGENT_ASYNC_COMPLETE_EVENT } from "../../src/shared/types.ts";
 
-function createPi(registerOptions: RegisterSubagentNotifyOptions = {}) {
+function createPi(currentSessionId = "session-1", registerOptions: RegisterSubagentNotifyOptions = {}) {
 	const events = new EventEmitter();
 	const sent: Array<{ message: unknown; options: unknown }> = [];
 	const pi = {
@@ -22,12 +22,12 @@ function createPi(registerOptions: RegisterSubagentNotifyOptions = {}) {
 
 	// Formatting-focused tests run with batching disabled so single completions
 	// emit synchronously. Batching behavior is covered by the dedicated suite below.
-	registerSubagentNotify(pi as never, { batchConfig: { enabled: false }, ...registerOptions });
+	registerSubagentNotify(pi as never, { currentSessionId }, { batchConfig: { enabled: false }, ...registerOptions });
 
 	return { events, sent };
 }
 
-function createBatchingPi(clock: ReturnType<typeof createFakeClock>) {
+function createBatchingPi(clock: ReturnType<typeof createFakeClock>, currentSessionId = "session-a") {
 	const events = new EventEmitter();
 	const sent: Array<{ message: unknown; options: unknown }> = [];
 	const pi = {
@@ -36,7 +36,7 @@ function createBatchingPi(clock: ReturnType<typeof createFakeClock>) {
 			sent.push({ message, options });
 		},
 	};
-	registerSubagentNotify(pi as never, {
+	registerSubagentNotify(pi as never, { currentSessionId }, {
 		batchConfig: { enabled: true, debounceMs: 150, maxWaitMs: 1000, stragglerDebounceMs: 75, stragglerMaxWaitMs: 400, stragglerWindowMs: 2000 },
 		timers: clock.api,
 		now: clock.now,
@@ -87,6 +87,7 @@ function completionResult(overrides: Record<string, unknown> = {}) {
 		summary: "Done",
 		exitCode: 0,
 		timestamp: 123,
+		sessionId: "session-a",
 		...overrides,
 	};
 }
@@ -102,6 +103,7 @@ describe("registerSubagentNotify", () => {
 			summary: "",
 			exitCode: 0,
 			timestamp: 123,
+			sessionId: "session-1",
 		});
 
 		assert.equal(sent.length, 1);
@@ -128,6 +130,7 @@ describe("registerSubagentNotify", () => {
 			timestamp: 456,
 			taskIndex: 1,
 			totalTasks: 3,
+			sessionId: "session-1",
 		});
 
 		assert.equal(sent.length, 1);
@@ -152,6 +155,7 @@ describe("registerSubagentNotify", () => {
 			exitCode: 0,
 			timestamp: 456,
 			sessionFile: "/tmp/session.jsonl",
+			sessionId: "session-1",
 		});
 
 		assert.deepEqual(sent, [{
@@ -174,6 +178,7 @@ describe("registerSubagentNotify", () => {
 			state: "paused",
 			summary: "Paused after interrupt. Waiting for explicit next action.",
 			timestamp: 789,
+			sessionId: "session-1",
 		});
 
 		assert.equal(sent.length, 1);
@@ -185,6 +190,29 @@ describe("registerSubagentNotify", () => {
 			},
 			options: { triggerTurn: true },
 		});
+	});
+
+	it("ignores completions for other or missing session ids", () => {
+		const { events, sent } = createPi("session-owner");
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-other-session",
+			agent: "worker",
+			success: true,
+			summary: "Other done",
+			timestamp: 100,
+			sessionId: "session-other",
+		});
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, {
+			id: "notify-sessionless",
+			agent: "worker",
+			success: true,
+			summary: "Legacy cwd-scoped done",
+			timestamp: 101,
+			cwd: "/repo",
+		});
+
+		assert.deepEqual(sent, []);
 	});
 
 	it("emits failed completions immediately even while successes are held", () => {
@@ -223,31 +251,31 @@ describe("registerSubagentNotify", () => {
 		assert.deepEqual(sent[0]!.options, { triggerTurn: true });
 	});
 
-	it("does not group successes from different sessions", () => {
+	it("ignores successes from other sessions instead of grouping them", () => {
 		const clock = createFakeClock();
-		const { events, sent } = createBatchingPi(clock);
+		const { events, sent } = createBatchingPi(clock, "session-a");
 
 		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "s-1", agent: "alpha", summary: "alpha done", sessionId: "session-a" }));
 		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "s-2", agent: "beta", summary: "beta done", sessionId: "session-b" }));
 		clock.advance(150);
 
-		assert.equal(sent.length, 2);
+		assert.equal(sent.length, 1);
 		assert.match((sent[0]!.message as { content: string }).content, /^Background task completed: \*\*alpha\*\*/);
-		assert.match((sent[1]!.message as { content: string }).content, /^Background task completed: \*\*beta\*\*/);
+		assert.doesNotMatch((sent[0]!.message as { content: string }).content, /beta done/);
 	});
 
-	it("does not flush held successes from another session before an immediate failure", () => {
+	it("does not let another session failure flush held successes", () => {
 		const clock = createFakeClock();
-		const { events, sent } = createBatchingPi(clock);
+		const { events, sent } = createBatchingPi(clock, "session-a");
 
 		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "held-a-1", agent: "alpha", summary: "alpha done", sessionId: "session-a" }));
 		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "fail-b-1", agent: "beta", success: false, summary: "boom", exitCode: 1, sessionId: "session-b" }));
-		assert.equal(sent.length, 1);
-		assert.match((sent[0]!.message as { content: string }).content, /^Background task failed: \*\*beta\*\*/);
+		assert.equal(sent.length, 0);
 
 		clock.advance(150);
-		assert.equal(sent.length, 2);
-		assert.match((sent[1]!.message as { content: string }).content, /^Background task completed: \*\*alpha\*\*/);
+		assert.equal(sent.length, 1);
+		assert.match((sent[0]!.message as { content: string }).content, /^Background task completed: \*\*alpha\*\*/);
+		assert.doesNotMatch((sent[0]!.message as { content: string }).content, /boom/);
 	});
 });
 

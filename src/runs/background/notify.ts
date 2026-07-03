@@ -16,7 +16,7 @@ import {
 	createCompletionBatcher,
 	resolveCompletionBatchConfig,
 } from "./completion-batcher.ts";
-import { SUBAGENT_ASYNC_COMPLETE_EVENT } from "../../shared/types.ts";
+import { SUBAGENT_ASYNC_COMPLETE_EVENT, type SubagentState } from "../../shared/types.ts";
 
 interface ChainStepResult {
 	agent: string;
@@ -43,7 +43,6 @@ interface SubagentResult {
 	state?: string;
 	timestamp: number;
 	durationMs?: number;
-	sessionId?: string;
 	cwd?: string;
 	sessionFile?: string;
 	shareUrl?: string;
@@ -52,6 +51,7 @@ interface SubagentResult {
 	results?: ChainStepResult[];
 	taskIndex?: number;
 	totalTasks?: number;
+	sessionId?: string | null;
 }
 
 interface NotifyTimerApi {
@@ -156,6 +156,7 @@ export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDe
 
 export default function registerSubagentNotify(
 	pi: ExtensionAPI,
+	state: Pick<SubagentState, "currentSessionId">,
 	options: RegisterSubagentNotifyOptions = {},
 ): void {
 	const unsubscribeStoreKey = "__pi_subagents_notify_unsubscribe__";
@@ -192,6 +193,7 @@ export default function registerSubagentNotify(
 
 	const handleComplete = (data: unknown) => {
 		const result = data as SubagentResult;
+		if (typeof result.sessionId !== "string" || result.sessionId !== state.currentSessionId) return;
 		const now = nowFn();
 		const key = buildCompletionKey(result, "notify");
 		if (markSeenWithTtl(seen, key, now, ttlMs)) return;
