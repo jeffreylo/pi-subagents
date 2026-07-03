@@ -50,8 +50,6 @@ describe("registered subagent tool description", () => {
 		assert.match(description, /keep one writer/i);
 		assert.match(description, /view: "fleet"/);
 		assert.match(description, /view: "transcript"/);
-		assert.match(description, /view:"fleet"/);
-		assert.match(description, /view:"transcript"/);
 		assert.match(description, /status\.json/);
 		assert.match(description, /events\.jsonl/);
 	});
@@ -69,6 +67,8 @@ describe("registered subagent tool description", () => {
 		assert.match(description, /Do not sleep or poll/i);
 		assert.match(description, /ordinary child subagents are not orchestrators/i);
 		assert.match(description, /one writer/i);
+		assert.match(description, /view:"fleet"/);
+		assert.match(description, /view:"transcript"/);
 		assert.match(description, /status\.json/);
 		assert.match(description, /events\.jsonl/);
 	});
