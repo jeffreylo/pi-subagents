@@ -55,6 +55,16 @@ interface SubagentParamsSchema {
 			enum?: string[];
 			description?: string;
 		};
+		view?: {
+			type?: string;
+			enum?: string[];
+			description?: string;
+		};
+		lines?: {
+			minimum?: number;
+			maximum?: number;
+			description?: string;
+		};
 		control?: {
 			properties?: {
 				needsAttentionAfterMs?: { minimum?: number };
@@ -168,7 +178,7 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		const actionSchema = SubagentParams?.properties?.action;
 		assert.ok(actionSchema, "action schema should exist");
 		assert.equal(actionSchema.type, "string");
-		assert.deepEqual(actionSchema.enum, ["list", "get", "models", "create", "update", "delete", "status", "interrupt", "resume", "append-step", "doctor"]);
+		assert.deepEqual(actionSchema.enum, ["list", "get", "models", "create", "update", "delete", "status", "interrupt", "resume", "steer", "append-step", "doctor"]);
 		const description = String(actionSchema.description ?? "");
 		assert.match(description, /Management\/control action/);
 		assert.match(description, /Omit for execution mode/);
@@ -197,18 +207,34 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.equal(idSchema.type, "string");
 		assert.match(String(idSchema.description ?? ""), /status/i);
 		assert.match(String(idSchema.description ?? ""), /interrupt/i);
+		assert.match(String(idSchema.description ?? ""), /steer/i);
 		assert.match(String(idSchema.description ?? ""), /append-step/i);
 
 		const runIdSchema = SubagentParams?.properties?.runId;
 		assert.ok(runIdSchema, "runId schema should exist");
 		assert.equal(runIdSchema.type, "string");
 		assert.match(String(runIdSchema.description ?? ""), /interrupt/i);
+		assert.match(String(runIdSchema.description ?? ""), /steer/i);
 		assert.match(String(runIdSchema.description ?? ""), /append-step/i);
 
 		const dirSchema = SubagentParams?.properties?.dir;
 		assert.ok(dirSchema, "dir schema should exist");
 		assert.equal(dirSchema.type, "string");
 		assert.match(String(dirSchema.description ?? ""), /status/i);
+		assert.match(String(dirSchema.description ?? ""), /steer/i);
+
+		const viewSchema = SubagentParams?.properties?.view;
+		assert.ok(viewSchema, "view schema should exist");
+		assert.equal(viewSchema.type, "string");
+		assert.deepEqual(viewSchema.enum, ["fleet", "transcript"]);
+		assert.match(String(viewSchema.description ?? ""), /status view/i);
+		assert.match(String(viewSchema.description ?? ""), /transcript/i);
+
+		const linesSchema = SubagentParams?.properties?.lines;
+		assert.ok(linesSchema, "lines schema should exist");
+		assert.equal(linesSchema.minimum, 1);
+		assert.equal(linesSchema.maximum, 500);
+		assert.match(String(linesSchema.description ?? ""), /transcript/i);
 
 		const controlSchema = SubagentParams?.properties?.control;
 		assert.ok(controlSchema, "control schema should exist");
@@ -461,6 +487,8 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 			{ chain: [{ expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 4 }, parallel: { agent: "reviewer", task: "Review {target.path}", outputSchema: { type: "object" } }, collect: { as: "reviews" } }] },
 			{ agent: "worker", task: "Fix", acceptance: false },
 			{ agent: "worker", task: "Fix", timeoutMs: 1000 },
+			{ action: "steer", id: "run-1", message: "focus on tests" },
+			{ action: "steer", id: "run-1", index: 0, message: "focus on tests" },
 			{ tasks: [{ agent: "worker", task: "Fix" }], maxRuntimeMs: 1000 },
 			{ chain: [{ agent: "worker", task: "Fix" }], timeoutMs: 1000, maxRuntimeMs: 1000 },
 			{ agent: "worker", task: "Fix", acceptance: "checked" },

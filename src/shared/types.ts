@@ -168,7 +168,7 @@ export type SubagentLifecycleArtifactVersion = typeof SUBAGENT_LIFECYCLE_ARTIFAC
 
 export type PublicNestedStepSummary = Pick<
 	NestedStepSummary,
-	"agent" | "status" | "sessionFile" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "startedAt" | "endedAt" | "error" | "timedOut" | "turnBudget" | "turnBudgetExceeded" | "wrapUpRequested"
+	"agent" | "status" | "sessionFile" | "transcriptPath" | "transcriptError" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "startedAt" | "endedAt" | "error" | "timedOut"
 > & {
 	children?: PublicNestedRunSummary[];
 };
@@ -446,6 +446,8 @@ export interface SingleResult {
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
 	acceptance?: AcceptanceLedger;
+	transcriptPath?: string;
+	transcriptError?: string;
 	children?: NestedRunSummary[];
 }
 
@@ -493,6 +495,7 @@ export interface ArtifactPaths {
 	inputPath: string;
 	outputPath: string;
 	jsonlPath: string;
+	transcriptPath: string;
 	metadataPath: string;
 }
 
@@ -501,6 +504,7 @@ export interface ArtifactConfig {
 	includeInput: boolean;
 	includeOutput: boolean;
 	includeJsonl: boolean;
+	includeTranscript?: boolean;
 	includeMetadata: boolean;
 	cleanupDays: number;
 }
@@ -531,6 +535,8 @@ export interface NestedStepSummary {
 	agent: string;
 	status: "pending" | "running" | "complete" | "completed" | "failed" | "paused";
 	sessionFile?: string;
+	transcriptPath?: string;
+	transcriptError?: string;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
 	currentTool?: string;
@@ -629,6 +635,8 @@ export interface AsyncStatus {
 	currentPath?: string;
 	turnCount?: number;
 	toolCount?: number;
+	steerCount?: number;
+	lastSteerAt?: number;
 	startedAt: number;
 	endedAt?: number;
 	lastUpdate?: number;
@@ -654,6 +662,8 @@ export interface AsyncStatus {
 		status: "pending" | "running" | "complete" | "completed" | "failed" | "paused";
 		children?: NestedRunSummary[];
 		sessionFile?: string;
+		transcriptPath?: string;
+		transcriptError?: string;
 		activityState?: ActivityState;
 		lastActivityAt?: number;
 		currentTool?: string;
@@ -679,6 +689,8 @@ export interface AsyncStatus {
 		attemptedModels?: string[];
 		modelAttempts?: ModelAttempt[];
 		totalCost?: CostSummary;
+		steerCount?: number;
+		lastSteerAt?: number;
 		error?: string;
 		structuredOutput?: unknown;
 		structuredOutputPath?: string;
@@ -710,6 +722,8 @@ export interface AsyncJobState {
 	currentPath?: string;
 	turnCount?: number;
 	toolCount?: number;
+	steerCount?: number;
+	lastSteerAt?: number;
 	mode?: SubagentRunMode;
 	agents?: string[];
 	currentStep?: number;
@@ -926,8 +940,12 @@ export interface CompanionSuggestionsConfig {
 	packages?: Partial<Record<CompanionSuggestionPackage, CompanionSuggestionPackageConfig>>;
 }
 
+export type ToolDescriptionMode = "full" | "compact" | "custom";
+
 export interface ExtensionConfig {
 	asyncByDefault?: boolean;
+	/** Tool description variant registered for the parent-facing subagent tool. Defaults to full. */
+	toolDescriptionMode?: ToolDescriptionMode;
 	forceTopLevelAsync?: boolean;
 	defaultSessionDir?: string;
 	singleRunOutputBaseDir?: string;
@@ -961,6 +979,7 @@ export const DEFAULT_ARTIFACT_CONFIG: ArtifactConfig = {
 	includeInput: true,
 	includeOutput: true,
 	includeJsonl: false,
+	includeTranscript: true,
 	includeMetadata: true,
 	cleanupDays: 7,
 };
@@ -1037,7 +1056,7 @@ export const POLL_INTERVAL_MS = 250;
 export const MAX_WIDGET_JOBS = 4;
 export const DEFAULT_SUBAGENT_MAX_DEPTH = 2;
 export const DEFAULT_MAX_SUBAGENT_SPAWNS_PER_SESSION = 40;
-export const SUBAGENT_ACTIONS = ["list", "get", "models", "create", "update", "delete", "status", "interrupt", "resume", "append-step", "doctor"] as const;
+export const SUBAGENT_ACTIONS = ["list", "get", "models", "create", "update", "delete", "status", "interrupt", "resume", "steer", "append-step", "doctor"] as const;
 
 export const DEFAULT_FORK_PREAMBLE =
 	"You are a delegated subagent running from a fork of the parent session. " +

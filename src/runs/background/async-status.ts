@@ -27,6 +27,8 @@ interface AsyncRunStepSummary {
 	recentOutput?: string[];
 	turnCount?: number;
 	toolCount?: number;
+	steerCount?: number;
+	lastSteerAt?: number;
 	durationMs?: number;
 	tokens?: TokenUsage;
 	totalCost?: CostSummary;
@@ -55,6 +57,8 @@ export interface AsyncRunSummary {
 	currentPath?: string;
 	turnCount?: number;
 	toolCount?: number;
+	steerCount?: number;
+	lastSteerAt?: number;
 	mode: SubagentRunMode;
 	cwd?: string;
 	startedAt: number;
@@ -174,6 +178,8 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.recentOutput ? { recentOutput: [...step.recentOutput] } : {}),
 			...(step.turnCount !== undefined ? { turnCount: step.turnCount } : {}),
 			...(step.toolCount !== undefined ? { toolCount: step.toolCount } : {}),
+			...(step.steerCount !== undefined ? { steerCount: step.steerCount } : {}),
+			...(step.lastSteerAt !== undefined ? { lastSteerAt: step.lastSteerAt } : {}),
 			...(step.durationMs !== undefined ? { durationMs: step.durationMs } : {}),
 			...(step.tokens ? { tokens: step.tokens } : {}),
 			...(step.totalCost ? { totalCost: step.totalCost } : {}),
@@ -203,6 +209,8 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		currentPath: status.currentPath,
 		turnCount: status.turnCount,
 		toolCount: status.toolCount,
+		steerCount: status.steerCount,
+		lastSteerAt: status.lastSteerAt,
 		mode: status.mode,
 		cwd: status.cwd,
 		startedAt: status.startedAt,
@@ -300,7 +308,7 @@ export function listAsyncRuns(asyncDirRoot: string, options: AsyncRunListOptions
 	return options.limit !== undefined ? sorted.slice(0, options.limit) : sorted;
 }
 
-function formatActivityFacts(input: { activityState?: ActivityState; lastActivityAt?: number; currentTool?: string; currentToolStartedAt?: number; currentPath?: string; turnCount?: number; toolCount?: number; turnBudget?: TurnBudgetState; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean }): string | undefined {
+function formatActivityFacts(input: { activityState?: ActivityState; lastActivityAt?: number; currentTool?: string; currentToolStartedAt?: number; currentPath?: string; turnCount?: number; toolCount?: number; steerCount?: number; lastSteerAt?: number; turnBudget?: TurnBudgetState; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean }): string | undefined {
 	const facts: string[] = [];
 	if (input.currentTool && input.currentToolStartedAt !== undefined) facts.push(`tool ${input.currentTool} ${formatDuration(Math.max(0, Date.now() - input.currentToolStartedAt))}`);
 	else if (input.currentTool) facts.push(`tool ${input.currentTool}`);
@@ -310,6 +318,8 @@ function formatActivityFacts(input: { activityState?: ActivityState; lastActivit
 	else if (input.wrapUpRequested && input.turnBudget) facts.push(`wrap-up requested ${input.turnBudget.turnCount}/${input.turnBudget.maxTurns}`);
 	else if (input.turnBudget) facts.push(`turn budget ${input.turnBudget.turnCount}/${input.turnBudget.maxTurns}+${input.turnBudget.graceTurns}`);
 	if (input.toolCount !== undefined) facts.push(`${input.toolCount} tools`);
+	if (input.steerCount !== undefined) facts.push(`${input.steerCount} steers`);
+	if (typeof input.lastSteerAt === "number" && Number.isFinite(input.lastSteerAt)) facts.push(`last steer ${new Date(input.lastSteerAt).toISOString()}`);
 	const activity = formatActivityLabel(input.lastActivityAt, input.activityState);
 	return activity || facts.length ? [activity, ...facts].filter(Boolean).join(" | ") : undefined;
 }

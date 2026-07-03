@@ -4,7 +4,8 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Message } from "@earendil-works/pi-ai";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
-import { consumeInterruptRequest, deliverInterruptRequest, deliverTimeoutRequest, watchAsyncControlInbox } from "./control-channel.ts";
+import { createChildTranscriptWriter, type ChildTranscriptWriter } from "../../shared/child-transcript.ts";
+import { consumeInterruptRequest, deliverInterruptRequest, deliverTimeoutRequest, enqueueStepSteer, stepSteerInboxDir, watchAsyncControlInbox, type SteerRequest } from "./control-channel.ts";
 import { appendJsonl as appendRawJsonl, getArtifactPaths } from "../../shared/artifacts.ts";
 import { PI_CODING_AGENT_PACKAGE, getPiSpawnCommand, resolveInstalledPiPackageRoot } from "../shared/pi-spawn.ts";
 import { captureSingleOutputSnapshot, finalizeSingleOutput, formatSavedOutputReference, resolveSingleOutput, type SingleOutputSnapshot } from "../shared/single-output.ts";
@@ -145,6 +146,8 @@ interface StepResult {
 	totalCost?: CostSummary;
 	artifactPaths?: ArtifactPaths;
 	truncated?: boolean;
+	transcriptPath?: string;
+	transcriptError?: string;
 	structuredOutput?: unknown;
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
@@ -355,6 +358,7 @@ function runPiStreaming(
 	childEventContext?: ChildEventContext,
 	registerInterrupt?: (interrupt: (() => void) | undefined) => void,
 	onChildEvent?: (event: ChildEvent) => void,
+	transcriptWriter?: ChildTranscriptWriter,
 	registerTimeout?: (interrupt: (() => void) | undefined) => void,
 	timeoutMessage?: string,
 	registerTurnBudgetAbort?: (abort: ((message: string, state?: TurnBudgetState) => void) | undefined) => void,
@@ -414,6 +418,8 @@ function runPiStreaming(
 
 		const appendChildLine = (type: "subagent.child.stdout" | "subagent.child.stderr", line: string) => {
 			appendChildEvent({ type, line });
+			if (type === "subagent.child.stdout") transcriptWriter?.writeStdoutLine(line);
+			else transcriptWriter?.writeStderrLine(line);
 		};
 
 		const processStdoutLine = (line: string) => {
@@ -429,6 +435,7 @@ function runPiStreaming(
 			}
 
 			appendChildEvent(event);
+			transcriptWriter?.writeChildEvent(event);
 			onChildEvent?.(event);
 
 			if (event.type === "tool_execution_start" && event.toolName) {
@@ -748,6 +755,8 @@ interface SingleStepContext {
 	flatIndex: number;
 	flatStepCount: number;
 	outputFile: string;
+	steerInboxDir?: string;
+	transcriptPath?: string;
 	piPackageRoot?: string;
 	piArgv1?: string;
 	registerInterrupt?: (interrupt: (() => void) | undefined) => void;
@@ -777,6 +786,8 @@ async function runSingleStep(
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	artifactPaths?: ArtifactPaths;
+	transcriptPath?: string;
+	transcriptError?: string;
 	interrupted?: boolean;
 	timedOut?: boolean;
 	turnBudget?: TurnBudgetState;
@@ -854,6 +865,7 @@ async function runSingleStep(
 	const sessionDir = step.sessionFile ? undefined : ctx.sessionDir;
 
 	let artifactPaths: ArtifactPaths | undefined;
+	let transcriptWriter: ChildTranscriptWriter | undefined;
 	if (ctx.artifactsDir && ctx.artifactConfig?.enabled !== false) {
 		const index = ctx.flatStepCount > 1 ? ctx.flatIndex : undefined;
 		artifactPaths = getArtifactPaths(ctx.artifactsDir, ctx.id, step.agent, index);
@@ -861,7 +873,18 @@ async function runSingleStep(
 		if (ctx.artifactConfig?.includeInput !== false) {
 			fs.writeFileSync(artifactPaths.inputPath, `# Task for ${step.agent}\n\n${task}`, "utf-8");
 		}
+		if (ctx.artifactConfig?.includeTranscript !== false) {
+			transcriptWriter = createChildTranscriptWriter({
+				transcriptPath: artifactPaths.transcriptPath,
+				source: "async",
+				runId: ctx.id,
+				agent: step.agent,
+				childIndex: ctx.flatIndex,
+				cwd: step.cwd ?? ctx.cwd,
+			});
+		}
 	}
+	transcriptWriter?.writeInitialUserMessage(task);
 
 	const candidates = step.modelCandidates && step.modelCandidates.length > 0
 		? step.modelCandidates
@@ -917,6 +940,7 @@ async function runSingleStep(
 			parentControlInbox: ctx.nestedRoute?.controlInbox,
 			parentRootRunId: ctx.nestedRoute?.rootRunId,
 			parentCapabilityToken: ctx.nestedRoute?.capabilityToken,
+			steerInboxDir: ctx.steerInboxDir,
 			structuredOutput: effectiveStructuredOutput,
 		});
 		const run = await runPiStreaming(
@@ -930,6 +954,7 @@ async function runSingleStep(
 			{ eventsPath, runId: ctx.id, stepIndex: ctx.flatIndex, agent: step.agent },
 			ctx.registerInterrupt,
 			ctx.onChildEvent,
+			transcriptWriter,
 			ctx.registerTimeout,
 			ctx.timeoutMessage,
 			ctx.registerTurnBudgetAbort,
@@ -1085,6 +1110,8 @@ async function runSingleStep(
 					model: finalResult?.model,
 					attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 					modelAttempts,
+					...(transcriptWriter ? { transcriptPath: artifactPaths.transcriptPath } : {}),
+					transcriptError: transcriptWriter?.getError(),
 					skills: step.skills,
 					timestamp: Date.now(),
 				}, null, 2),
@@ -1105,6 +1132,8 @@ async function runSingleStep(
 		modelAttempts,
 		totalCost: costSummaryFromAttempts(modelAttempts),
 		artifactPaths,
+		transcriptPath: transcriptWriter ? artifactPaths?.transcriptPath : undefined,
+		transcriptError: transcriptWriter?.getError(),
 		interrupted: timedOutAfterAcceptance || turnBudgetExceeded ? false : finalResult?.interrupted,
 		timedOut: timedOutAfterAcceptance ? true : finalResult?.timedOut,
 		turnBudget,
@@ -1243,6 +1272,23 @@ function ensureParallelProgressFile(cwd: string, group: Extract<RunnerStep, { pa
 	writeInitialProgressFile(cwd);
 }
 
+function resolveAsyncStepTranscriptPath(input: {
+	artifactsDir?: string;
+	artifactConfig?: Partial<ArtifactConfig>;
+	runId: string;
+	agent: string;
+	flatIndex: number;
+	flatStepCount: number;
+}): string | undefined {
+	if (!input.artifactsDir || input.artifactConfig?.enabled === false || input.artifactConfig?.includeTranscript === false) return undefined;
+	return getArtifactPaths(
+		input.artifactsDir,
+		input.runId,
+		input.agent,
+		input.flatStepCount > 1 ? input.flatIndex : undefined,
+	).transcriptPath;
+}
+
 type SingleStepResult = Awaited<ReturnType<typeof runSingleStep>>;
 
 async function runSubagent(config: SubagentRunConfig): Promise<void> {
@@ -1262,6 +1308,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	const activeChildInterrupts = new Map<number, () => void>();
 	const activeChildTimeouts = new Map<number, () => void>();
 	const activeChildTurnBudgetAborts = new Map<number, (message: string, state?: TurnBudgetState) => void>();
+	const pendingStepSteers: SteerRequest[] = [];
 	let interrupted = false;
 	let currentActivityState: ActivityState | undefined;
 	let activityTimer: NodeJS.Timeout | undefined;
@@ -1273,6 +1320,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	let previousCumulativeTokens: TokenUsage = { input: 0, output: 0, total: 0 };
 	let latestSessionFile: string | undefined;
 
+	const flatSteps = flattenSteps(steps);
+	const initialFlatStepCount = flatSteps.length;
 	const parallelGroups: Array<{ start: number; count: number; stepIndex: number }> = [];
 	const initialStatusSteps: RunnerStatusStep[] = [];
 	let flatStepCount = 0;
@@ -1281,6 +1330,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		if (isParallelGroup(step)) {
 			parallelGroups.push({ start: flatStepCount, count: step.parallel.length, stepIndex });
 			for (const task of step.parallel) {
+				const taskFlatIndex = flatStepCount;
+				const transcriptPath = resolveAsyncStepTranscriptPath({ artifactsDir, artifactConfig, runId: id, agent: task.agent, flatIndex: taskFlatIndex, flatStepCount: initialFlatStepCount });
 				initialStatusSteps.push({
 					agent: task.agent,
 					phase: task.phase,
@@ -1289,6 +1340,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					structured: task.structured,
 					status: "pending",
 					...(task.sessionFile ? { sessionFile: task.sessionFile } : {}),
+					...(transcriptPath ? { transcriptPath } : {}),
 					skills: task.skills,
 					model: task.model,
 					thinking: task.thinking,
@@ -1296,8 +1348,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					recentTools: [],
 					recentOutput: [],
 				});
+				flatStepCount++;
 			}
-			flatStepCount += step.parallel.length;
 		} else if (isDynamicRunnerGroup(step)) {
 			parallelGroups.push({ start: flatStepCount, count: 1, stepIndex });
 			initialStatusSteps.push({
@@ -1312,6 +1364,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			});
 			flatStepCount++;
 		} else {
+			const stepFlatIndex = flatStepCount;
+			const transcriptPath = resolveAsyncStepTranscriptPath({ artifactsDir, artifactConfig, runId: id, agent: step.agent, flatIndex: stepFlatIndex, flatStepCount: initialFlatStepCount });
 			initialStatusSteps.push({
 				agent: step.agent,
 				phase: step.phase,
@@ -1320,6 +1374,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				structured: step.structured,
 				status: "pending",
 				...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
+				...(transcriptPath ? { transcriptPath } : {}),
 				skills: step.skills,
 				model: step.model,
 				thinking: step.thinking,
@@ -1330,7 +1385,6 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			flatStepCount++;
 		}
 	}
-	const flatSteps = flattenSteps(steps);
 	const sessionEnabled = Boolean(config.sessionDir)
 		|| shareEnabled
 		|| flatSteps.some((step) => Boolean(step.sessionFile));
@@ -1658,6 +1712,58 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		appendControlEvent(event);
 		return true;
 	};
+	const deliverSteerRequest = (request: SteerRequest): void => {
+		if (statusPayload.state !== "running") return;
+		const runningIndexes = statusPayload.steps
+			.map((step, index) => ({ step, index }))
+			.filter(({ step }) => step.status === "running")
+			.map(({ index }) => index);
+		const targets = request.targetIndex !== undefined ? [request.targetIndex] : runningIndexes;
+		const now = Date.now();
+		const accepted: number[] = [];
+		const rejected: Array<{ index: number; reason: string }> = [];
+		for (const index of targets) {
+			const step = statusPayload.steps[index];
+			if (!step) {
+				rejected.push({ index, reason: "child index out of range" });
+				continue;
+			}
+			if (step.status !== "running") {
+				rejected.push({ index, reason: `child is ${step.status}` });
+				continue;
+			}
+			enqueueStepSteer(asyncDir, index, request);
+			step.steerCount = (step.steerCount ?? 0) + 1;
+			step.lastSteerAt = now;
+			accepted.push(index);
+		}
+		if (accepted.length > 0) {
+			statusPayload.steerCount = (statusPayload.steerCount ?? 0) + accepted.length;
+			statusPayload.lastSteerAt = now;
+			statusPayload.lastUpdate = now;
+			writeStatusPayload();
+		}
+		appendJsonl(eventsPath, JSON.stringify({
+			type: "subagent.steer.requested",
+			ts: now,
+			runId: id,
+			requestId: request.id,
+			message: request.message,
+			...(request.source ? { source: request.source } : {}),
+			...(request.targetIndex !== undefined ? { targetIndex: request.targetIndex } : {}),
+			acceptedIndexes: accepted,
+			...(rejected.length ? { rejected } : {}),
+		}));
+	};
+	const flushPendingStepSteers = (flatIndex: number): void => {
+		const remaining: SteerRequest[] = [];
+		for (const request of pendingStepSteers.splice(0)) {
+			if (request.targetIndex === undefined) deliverSteerRequest({ ...request, targetIndex: flatIndex });
+			else if (request.targetIndex === flatIndex) deliverSteerRequest(request);
+			else remaining.push(request);
+		}
+		pendingStepSteers.push(...remaining);
+	};
 	const updateStepModel = (flatIndex: number, model: string | undefined, thinking: string | undefined, now = Date.now()): void => {
 		const step = statusPayload.steps[flatIndex];
 		if (!step) return;
@@ -1917,10 +2023,19 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 		timeoutActiveChildren();
 	};
 	process.on(ASYNC_INTERRUPT_SIGNAL, interruptRunner);
-	// Portable control inbox: the parent drops an interrupt request file here when
-	// it cannot deliver the OS signal (e.g. ENOSYS on Windows). Routes into the
-	// same graceful interruptRunner() so stop/steer work on every platform.
-	const disposeControlInbox = watchAsyncControlInbox(asyncDir, { onInterrupt: interruptRunner, onTimeout: timeoutRunner });
+	// Portable control inbox: the parent drops control request files here when
+	// it cannot deliver OS signals (e.g. ENOSYS on Windows) or when steering a
+	// live child. Interrupts still route into the same graceful interruptRunner().
+	const disposeControlInbox = watchAsyncControlInbox(asyncDir, {
+		onInterrupt: interruptRunner,
+		onTimeout: timeoutRunner,
+		onSteer: (request) => {
+			const targetStep = request.targetIndex !== undefined ? statusPayload.steps[request.targetIndex] : undefined;
+			if (targetStep?.status === "pending") pendingStepSteers.push(request);
+			else if (request.targetIndex !== undefined || statusPayload.steps.some((step) => step.status === "running")) deliverSteerRequest(request);
+			else pendingStepSteers.push(request);
+		},
+	});
 	if (config.deadlineAt !== undefined) {
 		const remainingMs = Math.max(0, config.deadlineAt - Date.now());
 		timeoutTimer = setTimeout(timeoutRunner, remainingMs);
@@ -2053,7 +2168,10 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					structuredOutputSchema: step.parallel.structuredOutputSchema ?? step.parallel.structuredOutput?.schema,
 				};
 			});
-			const dynamicStatusSteps: RunnerStatusStep[] = dynamicSteps.map((task) => ({
+			const dynamicFlatStepCount = Math.max(statusPayload.steps.length - 1 + dynamicSteps.length, 1);
+			const dynamicStatusSteps: RunnerStatusStep[] = dynamicSteps.map((task, itemIndex) => {
+				const transcriptPath = resolveAsyncStepTranscriptPath({ artifactsDir, artifactConfig, runId: id, agent: task.agent, flatIndex: groupStartFlatIndex + itemIndex, flatStepCount: dynamicFlatStepCount });
+				return {
 					agent: task.agent,
 					phase: task.phase ?? step.phase,
 					label: task.label,
@@ -2061,13 +2179,15 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					structured: Boolean(task.structuredOutputSchema),
 					status: "pending",
 					...(task.sessionFile ? { sessionFile: task.sessionFile } : {}),
+					...(transcriptPath ? { transcriptPath } : {}),
 					skills: task.skills,
 					model: task.model,
 					thinking: task.thinking,
 					attemptedModels: task.modelCandidates && task.modelCandidates.length > 0 ? task.modelCandidates : task.model ? [task.model] : undefined,
 					recentTools: [],
 					recentOutput: [],
-				}));
+				};
+			});
 			statusPayload.steps.splice(groupStartFlatIndex, 1, ...dynamicStatusSteps);
 			if (config.childIntercomTargets) {
 				config.childIntercomTargets = statusPayload.steps.map((statusStep, index) => resolveSubagentIntercomTarget(id, statusStep.agent, index));
@@ -2143,6 +2263,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				statusPayload.lastUpdate = taskStartTime;
 				writeStatusPayload();
 				appendJsonl(eventsPath, JSON.stringify({ type: "subagent.step.started", ts: taskStartTime, runId: id, stepIndex: fi, agent: task.agent }));
+				flushPendingStepSteers(fi);
 				const singleResult = await runSingleStep(task, {
 					previousOutput, placeholder, cwd, sessionEnabled,
 					outputs,
@@ -2150,6 +2271,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					artifactsDir, artifactConfig, id,
 					flatIndex: fi, flatStepCount: Math.max(statusPayload.steps.length, 1),
 					outputFile: path.join(asyncDir, `output-${fi}.log`),
+					steerInboxDir: stepSteerInboxDir(asyncDir, fi),
 					piPackageRoot: config.piPackageRoot,
 					piArgv1: config.piArgv1,
 					childIntercomTarget: config.childIntercomTargets?.[fi],
@@ -2184,6 +2306,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				statusPayload.steps[fi].modelAttempts = singleResult.modelAttempts;
 				statusPayload.steps[fi].totalCost = singleResult.totalCost;
 				statusPayload.steps[fi].error = timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.error;
+				statusPayload.steps[fi].transcriptPath = singleResult.transcriptPath ?? statusPayload.steps[fi].transcriptPath;
+				statusPayload.steps[fi].transcriptError = singleResult.transcriptError;
 				statusPayload.steps[fi].structuredOutput = singleResult.structuredOutput;
 				statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
 				statusPayload.steps[fi].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
@@ -2220,6 +2344,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					modelAttempts: pr.modelAttempts,
 					totalCost: pr.totalCost,
 					artifactPaths: pr.artifactPaths,
+					transcriptPath: pr.transcriptPath,
+					transcriptError: pr.transcriptError,
 					structuredOutput: pr.structuredOutput,
 					structuredOutputPath: pr.structuredOutputPath,
 					structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
@@ -2417,6 +2543,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							? path.join(config.sessionDir, `parallel-${taskIdx}`)
 							: undefined;
 						const { taskForRun, taskCwd } = prepareParallelTaskRun(task, cwd, worktreeSetup, taskIdx);
+						flushPendingStepSteers(fi);
 
 						const singleResult = await runSingleStep(taskForRun, {
 							previousOutput, placeholder, cwd: taskCwd, sessionEnabled,
@@ -2425,6 +2552,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							artifactsDir, artifactConfig, id,
 							flatIndex: fi, flatStepCount: Math.max(statusPayload.steps.length, 1),
 							outputFile: path.join(asyncDir, `output-${fi}.log`),
+							steerInboxDir: stepSteerInboxDir(asyncDir, fi),
 							piPackageRoot: config.piPackageRoot,
 							piArgv1: config.piArgv1,
 							childIntercomTarget: config.childIntercomTargets?.[fi],
@@ -2465,6 +2593,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.steps[fi].modelAttempts = singleResult.modelAttempts;
 						statusPayload.steps[fi].totalCost = singleResult.totalCost;
 						statusPayload.steps[fi].error = timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.error;
+						statusPayload.steps[fi].transcriptPath = singleResult.transcriptPath ?? statusPayload.steps[fi].transcriptPath;
+						statusPayload.steps[fi].transcriptError = singleResult.transcriptError;
 						statusPayload.steps[fi].structuredOutput = singleResult.structuredOutput;
 						statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
 						statusPayload.steps[fi].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
@@ -2537,6 +2667,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						modelAttempts: pr.modelAttempts,
 						totalCost: pr.totalCost,
 						artifactPaths: pr.artifactPaths,
+						transcriptPath: pr.transcriptPath,
+						transcriptError: pr.transcriptError,
 							structuredOutput: pr.structuredOutput,
 							structuredOutputPath: pr.structuredOutputPath,
 							structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
@@ -2603,6 +2735,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				agent: seqStep.agent,
 			}));
 
+			flushPendingStepSteers(flatIndex);
 			const singleResult = await runSingleStep(seqStep, {
 				previousOutput, placeholder, cwd, sessionEnabled,
 				outputs,
@@ -2610,6 +2743,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				artifactsDir, artifactConfig, id,
 				flatIndex, flatStepCount: Math.max(statusPayload.steps.length, 1),
 				outputFile: path.join(asyncDir, `output-${flatIndex}.log`),
+				steerInboxDir: stepSteerInboxDir(asyncDir, flatIndex),
 				piPackageRoot: config.piPackageRoot,
 				piArgv1: config.piArgv1,
 				childIntercomTarget: config.childIntercomTargets?.[flatIndex],
@@ -2643,6 +2777,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				modelAttempts: singleResult.modelAttempts,
 				totalCost: singleResult.totalCost,
 				artifactPaths: singleResult.artifactPaths,
+				transcriptPath: singleResult.transcriptPath,
+				transcriptError: singleResult.transcriptError,
 				structuredOutput: singleResult.structuredOutput,
 				structuredOutputPath: singleResult.structuredOutputPath,
 				structuredOutputSchemaPath: singleResult.structuredOutputSchemaPath,
@@ -2702,6 +2838,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.steps[flatIndex].modelAttempts = singleResult.modelAttempts;
 			statusPayload.steps[flatIndex].totalCost = singleResult.totalCost;
 			statusPayload.steps[flatIndex].error = timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.error;
+			statusPayload.steps[flatIndex].transcriptPath = singleResult.transcriptPath ?? statusPayload.steps[flatIndex].transcriptPath;
+			statusPayload.steps[flatIndex].transcriptError = singleResult.transcriptError;
 			statusPayload.steps[flatIndex].structuredOutput = singleResult.structuredOutput;
 			statusPayload.steps[flatIndex].structuredOutputPath = singleResult.structuredOutputPath;
 			statusPayload.steps[flatIndex].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
@@ -2901,6 +3039,8 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				totalCost: r.totalCost,
 				artifactPaths: r.artifactPaths,
 				truncated: r.truncated,
+				transcriptPath: r.transcriptPath,
+				transcriptError: r.transcriptError,
 				structuredOutput: r.structuredOutput,
 				structuredOutputPath: r.structuredOutputPath,
 				structuredOutputSchemaPath: r.structuredOutputSchemaPath,

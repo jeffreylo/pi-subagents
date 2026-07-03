@@ -241,6 +241,8 @@ If a provider rejects model IDs with thinking suffixes, use
 builtin thinking defaults globally. A higher-precedence per-agent `thinking`
 override can opt one builtin back in.
 
+Tool description modes live in `~/.pi/agent/extensions/subagent/config.json`, not `subagents` settings. Set `toolDescriptionMode` to `compact` to reduce tool-description prompt cost while keeping the execution, async/wait, child-safety, one-writer, management/action, and artifact/status guardrails. Set it to `custom` to read `subagent-tool-description.md` from the project config dir or agent dir; invalid custom files fall back to full mode and the safety guidance is still appended.
+
 ## Discovery and Scope Rules
 
 Agent files can live in:
@@ -364,7 +366,7 @@ const run = subagent({
 // Continue local inspection, then later call status with the returned id.
 ```
 
-Inspect async runs with `subagent({ action: "status", id: "..." })` or `subagent({ action: "status" })` for active runs. If a delegated fanout child launches nested runs, the parent status view shows them as a tree and you can target a nested run directly with its nested id.
+Inspect async runs with `subagent({ action: "status", id: "..." })` or `subagent({ action: "status" })` for active runs. Use `subagent({ action: "status", view: "fleet" })` when supervising several active foreground/background runs and `subagent({ action: "status", id: "...", view: "transcript", index: 0 })` when you need the latest child output without digging through artifacts. If a delegated fanout child launches nested runs, the parent status view shows them as a tree and you can target a nested run directly with its nested id.
 
 Use `resume` for follow-up work after a delegated run:
 
@@ -640,6 +642,12 @@ If `subagent({ action: "list" })`, `/subagents-doctor`, or a startup message rec
 `pi-intercom` or `pi-prompt-template-model`, offer to run the shown `pi install npm:<package>`
 command only after user approval. To hide future recommendations, use
 `/subagents-companions hide <package> workspace` or `... user`.
+
+## Extension RPC
+
+Other Pi extensions can call `pi-subagents` through the in-process event bus. The stable v1 channels are `subagents:rpc:v1:ready`, `subagents:rpc:v1:request`, and per-request replies at `subagents:rpc:v1:reply:<requestId>`. Envelopes use `{ version: 1, requestId, method, params }`, and replies use `{ version: 1, requestId, success, data | error }`.
+
+Methods: `ping`, `status`, `spawn`, `interrupt`, and `stop`. `spawn` is async-only and rejects management actions, `async: false`, or `clarify: true`; it reuses the normal executor, so discovery, validation, session attribution, spawn limits, child-safety depth, artifacts, and async status are shared with the `subagent` tool. `status` and `interrupt` map to the normal control actions. `stop` targets running async runs through the existing timeout control channel. `pi.events` is process-local, so separate Pi processes and child subagents need lifecycle artifact files or `pi-intercom` instead.
 
 ## Important Constraints
 
