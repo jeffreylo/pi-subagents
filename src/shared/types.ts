@@ -149,7 +149,7 @@ export type SubagentLifecycleArtifactVersion = typeof SUBAGENT_LIFECYCLE_ARTIFAC
 
 export type PublicNestedStepSummary = Pick<
 	NestedStepSummary,
-	"agent" | "status" | "sessionFile" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "startedAt" | "endedAt" | "error" | "timedOut"
+	"agent" | "status" | "sessionFile" | "transcriptPath" | "transcriptError" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "startedAt" | "endedAt" | "error" | "timedOut"
 > & {
 	children?: PublicNestedRunSummary[];
 };
@@ -424,6 +424,8 @@ export interface SingleResult {
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
 	acceptance?: AcceptanceLedger;
+	transcriptPath?: string;
+	transcriptError?: string;
 	children?: NestedRunSummary[];
 }
 
@@ -470,6 +472,7 @@ export interface ArtifactPaths {
 	inputPath: string;
 	outputPath: string;
 	jsonlPath: string;
+	transcriptPath: string;
 	metadataPath: string;
 }
 
@@ -478,6 +481,7 @@ export interface ArtifactConfig {
 	includeInput: boolean;
 	includeOutput: boolean;
 	includeJsonl: boolean;
+	includeTranscript?: boolean;
 	includeMetadata: boolean;
 	cleanupDays: number;
 }
@@ -508,6 +512,8 @@ export interface NestedStepSummary {
 	agent: string;
 	status: "pending" | "running" | "complete" | "completed" | "failed" | "paused";
 	sessionFile?: string;
+	transcriptPath?: string;
+	transcriptError?: string;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
 	currentTool?: string;
@@ -623,6 +629,8 @@ export interface AsyncStatus {
 		status: "pending" | "running" | "complete" | "completed" | "failed" | "paused";
 		children?: NestedRunSummary[];
 		sessionFile?: string;
+		transcriptPath?: string;
+		transcriptError?: string;
 		activityState?: ActivityState;
 		lastActivityAt?: number;
 		currentTool?: string;
@@ -892,8 +900,12 @@ export interface CompanionSuggestionsConfig {
 	packages?: Partial<Record<CompanionSuggestionPackage, CompanionSuggestionPackageConfig>>;
 }
 
+export type ToolDescriptionMode = "full" | "compact" | "custom";
+
 export interface ExtensionConfig {
 	asyncByDefault?: boolean;
+	/** Tool description variant registered for the parent-facing subagent tool. Defaults to full. */
+	toolDescriptionMode?: ToolDescriptionMode;
 	forceTopLevelAsync?: boolean;
 	defaultSessionDir?: string;
 	singleRunOutputBaseDir?: string;
@@ -926,6 +938,7 @@ export const DEFAULT_ARTIFACT_CONFIG: ArtifactConfig = {
 	includeInput: true,
 	includeOutput: true,
 	includeJsonl: false,
+	includeTranscript: true,
 	includeMetadata: true,
 	cleanupDays: 7,
 };
