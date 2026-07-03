@@ -209,9 +209,9 @@ describe("registerSubagentNotify", () => {
 		const clock = createFakeClock();
 		const { events, sent } = createBatchingPi(clock);
 
-		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "g-1", agent: "alpha", summary: "alpha done" }));
-		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "g-2", agent: "beta", summary: "beta done" }));
-		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "g-3", agent: "gamma", summary: "gamma done" }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "g-1", agent: "alpha", summary: "alpha done", sessionId: "session-a" }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "g-2", agent: "beta", summary: "beta done", sessionId: "session-a" }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "g-3", agent: "gamma", summary: "gamma done", sessionId: "session-a" }));
 		assert.equal(sent.length, 0);
 
 		clock.advance(150);
@@ -221,6 +221,33 @@ describe("registerSubagentNotify", () => {
 		assert.match(content, /1\. alpha\nalpha done/);
 		assert.match(content, /3\. gamma\ngamma done/);
 		assert.deepEqual(sent[0]!.options, { triggerTurn: true });
+	});
+
+	it("does not group successes from different sessions", () => {
+		const clock = createFakeClock();
+		const { events, sent } = createBatchingPi(clock);
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "s-1", agent: "alpha", summary: "alpha done", sessionId: "session-a" }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "s-2", agent: "beta", summary: "beta done", sessionId: "session-b" }));
+		clock.advance(150);
+
+		assert.equal(sent.length, 2);
+		assert.match((sent[0]!.message as { content: string }).content, /^Background task completed: \*\*alpha\*\*/);
+		assert.match((sent[1]!.message as { content: string }).content, /^Background task completed: \*\*beta\*\*/);
+	});
+
+	it("does not flush held successes from another session before an immediate failure", () => {
+		const clock = createFakeClock();
+		const { events, sent } = createBatchingPi(clock);
+
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "held-a-1", agent: "alpha", summary: "alpha done", sessionId: "session-a" }));
+		events.emit(SUBAGENT_ASYNC_COMPLETE_EVENT, completionResult({ id: "fail-b-1", agent: "beta", success: false, summary: "boom", exitCode: 1, sessionId: "session-b" }));
+		assert.equal(sent.length, 1);
+		assert.match((sent[0]!.message as { content: string }).content, /^Background task failed: \*\*beta\*\*/);
+
+		clock.advance(150);
+		assert.equal(sent.length, 2);
+		assert.match((sent[1]!.message as { content: string }).content, /^Background task completed: \*\*alpha\*\*/);
 	});
 });
 

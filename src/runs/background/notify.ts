@@ -12,6 +12,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { buildCompletionKey, getGlobalSeenMap, markSeenWithTtl } from "./completion-dedupe.ts";
 import {
 	type CompletionBatchConfig,
+	type CompletionBatcher,
 	createCompletionBatcher,
 	resolveCompletionBatchConfig,
 } from "./completion-batcher.ts";
@@ -42,6 +43,8 @@ interface SubagentResult {
 	state?: string;
 	timestamp: number;
 	durationMs?: number;
+	sessionId?: string;
+	cwd?: string;
 	sessionFile?: string;
 	shareUrl?: string;
 	gistUrl?: string;
@@ -110,6 +113,13 @@ function sendCompletion(pi: Pick<ExtensionAPI, "sendMessage">, details: Subagent
 	);
 }
 
+function completionBatchKey(result: SubagentResult): string {
+	const sessionId = typeof result.sessionId === "string" ? result.sessionId.trim() : "";
+	if (sessionId) return `session:${sessionId}`;
+	const cwd = typeof result.cwd === "string" ? result.cwd.trim() : "";
+	return cwd ? `cwd:${cwd}` : "unknown";
+}
+
 export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDetails {
 	const agent = result.agent ?? "unknown";
 	const summary = typeof result.summary === "string" ? result.summary : "";
@@ -172,14 +182,13 @@ export default function registerSubagentNotify(
 	const ttlMs = 10 * 60 * 1000;
 	const nowFn = options.now ?? Date.now;
 	const batchConfig = resolveCompletionBatchConfig(options.batchConfig);
-
-	const batcher = createCompletionBatcher<SubagentNotifyDetails>({
-		config: batchConfig,
-		emit: (items) => sendCompletion(pi, items),
-		...(options.timers ? { timers: options.timers } : {}),
-		now: nowFn,
-	});
-	globalStore[batcherStoreKey] = batcher;
+	const batchers = new Map<string, CompletionBatcher<SubagentNotifyDetails>>();
+	globalStore[batcherStoreKey] = {
+		dispose() {
+			for (const batcher of batchers.values()) batcher.dispose();
+			batchers.clear();
+		},
+	};
 
 	const handleComplete = (data: unknown) => {
 		const result = data as SubagentResult;
@@ -188,10 +197,21 @@ export default function registerSubagentNotify(
 		if (markSeenWithTtl(seen, key, now, ttlMs)) return;
 
 		const details = buildCompletionDetails(result);
+		const batchKey = completionBatchKey(result);
+		let batcher = batchers.get(batchKey);
+		if (!batcher) {
+			batcher = createCompletionBatcher<SubagentNotifyDetails>({
+				config: batchConfig,
+				emit: (items) => sendCompletion(pi, items),
+				...(options.timers ? { timers: options.timers } : {}),
+				now: nowFn,
+			});
+			batchers.set(batchKey, batcher);
+		}
 		if (details.status !== "completed") {
 			// Failures and paused runs bypass grouping. Flush any held
-			// successes first so they are not stranded behind this signal,
-			// then emit the non-completion result immediately.
+			// successes for the same owner first so they are not stranded
+			// behind this signal, then emit the non-completion result immediately.
 			batcher.flush();
 			sendCompletion(pi, [details]);
 			return;

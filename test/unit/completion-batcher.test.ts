@@ -57,11 +57,22 @@ describe("resolveCompletionBatchConfig", () => {
 		assert.equal(resolved.maxWaitMs, 200);
 	});
 
-	it("rejects non-positive integers and falls back to defaults", () => {
-		const resolved = resolveCompletionBatchConfig({ debounceMs: 0, maxWaitMs: -5, stragglerWindowMs: Number.NaN });
+	it("rejects invalid booleans and non-positive or fractional integers", () => {
+		const resolved = resolveCompletionBatchConfig({ enabled: "false", debounceMs: 0, maxWaitMs: -5, stragglerDebounceMs: 1.5, stragglerWindowMs: Number.NaN } as never);
+		assert.equal(resolved.enabled, DEFAULT_COMPLETION_BATCH_CONFIG.enabled);
 		assert.equal(resolved.debounceMs, DEFAULT_COMPLETION_BATCH_CONFIG.debounceMs);
 		assert.equal(resolved.maxWaitMs, DEFAULT_COMPLETION_BATCH_CONFIG.maxWaitMs);
+		assert.equal(resolved.stragglerDebounceMs, DEFAULT_COMPLETION_BATCH_CONFIG.stragglerDebounceMs);
 		assert.equal(resolved.stragglerWindowMs, DEFAULT_COMPLETION_BATCH_CONFIG.stragglerWindowMs);
+	});
+
+	it("ignores invalid overrides instead of masking valid global config", () => {
+		const resolved = resolveCompletionBatchConfig(
+			{ enabled: false, debounceMs: 80 },
+			{ enabled: "false", debounceMs: "bad" } as never,
+		);
+		assert.equal(resolved.enabled, false);
+		assert.equal(resolved.debounceMs, 80);
 	});
 });
 
