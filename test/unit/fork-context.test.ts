@@ -102,6 +102,71 @@ describe("createForkContextResolver", () => {
 		}
 	});
 
+	it("passes branchSessionDir to openSession instead of the parent's session dir", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-branch-dir-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "sessions", "parent.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			const containedRoot = path.join(tempDir, "sessions", "parent", "run-id");
+			const seenSessionDirs: (string | undefined)[] = [];
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "leaf-abc",
+				getSessionDir: () => path.join(tempDir, "sessions"),
+			}, "fork", {
+				branchSessionDir: containedRoot,
+				openSession: (_sessionFile: string, sessionDir?: string) => {
+					seenSessionDirs.push(sessionDir);
+					return {
+						createBranchedSession: () => {
+							const childSessionFile = path.join(containedRoot, "child.jsonl");
+							writeMinimalSessionFile(childSessionFile, "child");
+							return childSessionFile;
+						},
+					};
+				},
+			});
+
+			assert.equal(resolver.sessionFileForIndex(0), path.join(containedRoot, "child.jsonl"));
+			assert.deepEqual(seenSessionDirs, [containedRoot]);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("contains branched sessions under branchSessionDir with the default package opener", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-contained-"));
+		try {
+			const sessionDir = path.join(tempDir, "sessions");
+			const parent = SessionManager.create(tempDir, sessionDir);
+			parent.appendMessage({ role: "user", content: "parent prompt" });
+			parent.appendMessage({ role: "assistant", content: "parent response" });
+			const parentSessionFile = parent.getSessionFile();
+			const leafId = parent.getLeafId();
+
+			assert.ok(parentSessionFile);
+			assert.ok(leafId);
+
+			// Intentionally not created beforehand: the resolver must create it.
+			const containedRoot = path.join(sessionDir, "parent-base", "run-id", "forks");
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => leafId,
+				getSessionDir: () => sessionDir,
+			}, "fork", { branchSessionDir: containedRoot });
+
+			const childSessionFile = resolver.sessionFileForIndex(0);
+			assert.ok(childSessionFile);
+			assert.equal(fs.existsSync(childSessionFile), true);
+			assert.equal(path.dirname(childSessionFile), containedRoot);
+			// The parent's top-level session dir must contain only the parent session.
+			const topLevelFiles = fs.readdirSync(sessionDir).filter((name) => name.endsWith(".jsonl"));
+			assert.deepEqual(topLevelFiles, [path.basename(parentSessionFile)]);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("creates forked sessions through the default package opener", () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-default-"));
 		try {
