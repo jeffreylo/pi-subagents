@@ -57,7 +57,7 @@ describe("async permission forwarding session identity", () => {
 				currentSessionId: "/tmp/parent-session.jsonl",
 			},
 			sessionFilesByFlatIndex: [undefined, "/tmp/dynamic-0.jsonl", "/tmp/dynamic-1.jsonl", "/tmp/static-worker.jsonl"],
-			thinkingOverridesByFlatIndex: [undefined, "off", "off", "off"],
+			forkSafetyInfoByFlatIndex: [undefined, { sanitized: true, danglingToolUse: true }, { sanitized: true, danglingToolUse: true }, { sanitized: true, danglingToolUse: true }],
 			maxSubagentDepth: 1,
 			asyncDir: "/tmp/async-run",
 		});
@@ -66,7 +66,7 @@ describe("async permission forwarding session identity", () => {
 		const dynamic = built.steps[1];
 		assert.ok(dynamic && "expand" in dynamic && "collect" in dynamic);
 		assert.deepEqual(dynamic.sessionFiles, ["/tmp/dynamic-0.jsonl", "/tmp/dynamic-1.jsonl"]);
-		assert.deepEqual(dynamic.thinkingOverrides, ["off", "off"]);
+		assert.deepEqual(dynamic.forkSafetyInfo, [{ sanitized: true, danglingToolUse: true }, { sanitized: true, danglingToolUse: true }]);
 		const staticWorker = built.steps[2];
 		assert.ok(staticWorker && !("parallel" in staticWorker));
 		assert.equal(staticWorker.sessionFile, "/tmp/static-worker.jsonl");
@@ -74,7 +74,7 @@ describe("async permission forwarding session identity", () => {
 		assert.equal(staticWorker.thinking, "off");
 	});
 
-	it("applies thinking overrides to async fallback candidates", () => {
+	it("keeps non-Anthropic fork thinking while forcing dangling Anthropic fallback candidates off", () => {
 		const built = buildAsyncRunnerSteps("run-abc", {
 			chain: [{ agent: "worker", task: "Do work" }],
 			agents: [{ ...makeAgent("worker"), model: "openai/gpt-5-mini:high", fallbackModels: ["anthropic/claude-sonnet-4:low"], thinking: "high" }],
@@ -83,7 +83,7 @@ describe("async permission forwarding session identity", () => {
 				cwd: "/tmp/project",
 				currentSessionId: "/tmp/parent-session.jsonl",
 			},
-			thinkingOverridesByFlatIndex: ["off"],
+			forkSafetyInfoByFlatIndex: [{ sanitized: true, danglingToolUse: true }],
 			maxSubagentDepth: 1,
 			asyncDir: "/tmp/async-run",
 		});
@@ -91,8 +91,30 @@ describe("async permission forwarding session identity", () => {
 		assert.ok(!("error" in built));
 		const step = built.steps[0];
 		assert.ok(step && !("parallel" in step));
-		assert.equal(step.model, "openai/gpt-5-mini:off");
-		assert.deepEqual(step.modelCandidates, ["openai/gpt-5-mini:off", "anthropic/claude-sonnet-4:off"]);
+		assert.equal(step.model, "openai/gpt-5-mini:high");
+		assert.deepEqual(step.modelCandidates, ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:off"]);
+		assert.equal(step.thinking, "high");
+	});
+
+	it("forces Anthropic primary off while keeping non-Anthropic fallback thinking on dangling forks", () => {
+		const built = buildAsyncRunnerSteps("run-abc", {
+			chain: [{ agent: "worker", task: "Do work" }],
+			agents: [{ ...makeAgent("worker"), model: "anthropic/claude-sonnet-4:low", fallbackModels: ["openai/gpt-5-mini:high"], thinking: "low" }],
+			ctx: {
+				pi: {} as never,
+				cwd: "/tmp/project",
+				currentSessionId: "/tmp/parent-session.jsonl",
+			},
+			forkSafetyInfoByFlatIndex: [{ sanitized: true, danglingToolUse: true }],
+			maxSubagentDepth: 1,
+			asyncDir: "/tmp/async-run",
+		});
+
+		assert.ok(!("error" in built));
+		const step = built.steps[0];
+		assert.ok(step && !("parallel" in step));
+		assert.equal(step.model, "anthropic/claude-sonnet-4:off");
+		assert.deepEqual(step.modelCandidates, ["anthropic/claude-sonnet-4:off", "openai/gpt-5-mini:high"]);
 		assert.equal(step.thinking, "off");
 	});
 });

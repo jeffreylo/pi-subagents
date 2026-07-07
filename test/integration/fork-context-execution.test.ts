@@ -336,7 +336,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.deepEqual(readSessionArgsFromCalls(), [path.join(tempDir, "fork-1.jsonl")]);
 	});
 
-	it("sanitizes inherited signed thinking and forces child thinking off", async () => {
+	it("sanitizes inherited signed thinking without forcing thinking off after completed turns", async () => {
 		const parentSessionFile = path.join(tempDir, "parent.jsonl");
 		const childSessionFile = path.join(tempDir, "fork-with-thinking.jsonl");
 		fs.writeFileSync(parentSessionFile, '{"type":"session","version":1,"id":"parent","timestamp":"2026-04-16T00:00:00.000Z","cwd":"/tmp"}\n', "utf-8");
@@ -372,11 +372,10 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 
 		assert.equal(result.isError, undefined);
 		const args = readCallArgs();
-		assert.equal(args[args.indexOf("--model") + 1], "anthropic/claude-sonnet-4-5:off");
+		assert.equal(args[args.indexOf("--model") + 1], "anthropic/claude-sonnet-4-5:high");
 		const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
 		assert.deepEqual(entries[2].message.content, [{ type: "text", text: "answer" }]);
-		assert.equal(entries[3].type, "thinking_level_change");
-		assert.equal(entries[3].thinkingLevel, "off");
+		assert.equal(entries.length, 3);
 	});
 
 	it("forces every foreground fallback attempt off after sanitizing inherited signed thinking", async () => {
@@ -429,7 +428,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 
 		assert.equal(result.isError, undefined);
 		const modelArgs = readAllCallArgs().map((args) => args[args.indexOf("--model") + 1]);
-		assert.deepEqual(modelArgs, ["openai/gpt-5-mini:off", "anthropic/claude-sonnet-4:off"]);
+		assert.deepEqual(modelArgs, ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:low"]);
 	});
 
 	it("keeps default-fork context on run-path errors", async () => {

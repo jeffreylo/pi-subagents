@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { findModelInfo, splitKnownThinkingSuffix, type ModelInfo } from "./model-info.ts";
 
 type SubagentExecutionContext = "fresh" | "fork";
 
@@ -16,6 +17,10 @@ interface BranchSessionEntry {
 		provider?: string;
 		api?: string;
 		model?: string;
+		toolCallId?: string;
+		tool_call_id?: string;
+		toolUseId?: string;
+		tool_use_id?: string;
 	};
 	thinkingLevel?: string;
 }
@@ -43,14 +48,19 @@ interface ForkContextResolverOptions {
 	branchSessionDir?: string;
 }
 
+export interface ForkSafetyInfo {
+	sanitized: boolean;
+	danglingToolUse: boolean;
+}
+
 interface ForkContextResolution {
 	sessionFile: string;
-	thinkingOverride?: "off";
+	safetyInfo: ForkSafetyInfo;
 }
 
 interface ForkContextResolver {
 	sessionFileForIndex(index?: number): string | undefined;
-	thinkingOverrideForIndex(index?: number): "off" | undefined;
+	forkSafetyInfoForIndex(index?: number): ForkSafetyInfo | undefined;
 }
 
 export function resolveSubagentContext(value: unknown): SubagentExecutionContext {
@@ -78,6 +88,52 @@ function createEntryId(entries: BranchSessionEntry[]): string {
 	return randomUUID();
 }
 
+function contentBlockType(block: unknown): string | undefined {
+	return block && typeof block === "object" && "type" in block && typeof block.type === "string" ? block.type : undefined;
+}
+
+function contentBlockId(block: unknown): string | undefined {
+	if (!block || typeof block !== "object") return undefined;
+	if ("id" in block && typeof block.id === "string") return block.id;
+	if ("toolUseId" in block && typeof block.toolUseId === "string") return block.toolUseId;
+	if ("tool_use_id" in block && typeof block.tool_use_id === "string") return block.tool_use_id;
+	if ("toolCallId" in block && typeof block.toolCallId === "string") return block.toolCallId;
+	if ("tool_call_id" in block && typeof block.tool_call_id === "string") return block.tool_call_id;
+	return undefined;
+}
+
+function messageToolResultId(message: BranchSessionEntry["message"]): string | undefined {
+	if (!message) return undefined;
+	return message.toolCallId ?? message.tool_call_id ?? message.toolUseId ?? message.tool_use_id;
+}
+
+function hasDanglingToolUse(entries: BranchSessionEntry[]): boolean {
+	const messageEntries = entries.filter((entry) => entry.type === "message" && entry.message);
+	for (let index = messageEntries.length - 1; index >= 0; index--) {
+		const message = messageEntries[index]?.message;
+		if (!message) continue;
+		if (message.role === "user") return false;
+		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+		const toolUseIds: string[] = [];
+		for (const block of message.content) {
+			const type = contentBlockType(block);
+			if (type !== "tool_use" && type !== "toolCall") continue;
+			const id = contentBlockId(block);
+			if (!id) return true;
+			toolUseIds.push(id);
+		}
+		if (toolUseIds.length === 0) continue;
+		const answeredIds = new Set<string>();
+		for (const entry of messageEntries.slice(index + 1)) {
+			if (entry.message?.role !== "toolResult") return false;
+			const id = messageToolResultId(entry.message);
+			if (id) answeredIds.add(id);
+		}
+		return toolUseIds.some((id) => !answeredIds.has(id));
+	}
+	return false;
+}
+
 function appendThinkingOffEntry(entries: BranchSessionEntry[]): void {
 	const last = entries[entries.length - 1];
 	if (last?.type === "thinking_level_change" && last.thinkingLevel === "off") return;
@@ -100,8 +156,31 @@ function sanitizeUnsafeThinkingBlocks(entries: BranchSessionEntry[]): boolean {
 		entry.message.content = filtered;
 		sanitized = true;
 	}
-	if (sanitized) appendThinkingOffEntry(entries);
 	return sanitized;
+}
+
+function sanitizeForkEntries(entries: BranchSessionEntry[]): ForkSafetyInfo {
+	const sanitized = sanitizeUnsafeThinkingBlocks(entries);
+	const danglingToolUse = sanitized ? hasDanglingToolUse(entries) : false;
+	if (danglingToolUse) appendThinkingOffEntry(entries);
+	return { sanitized, danglingToolUse };
+}
+
+function childModelIsAnthropic(model: string | undefined, availableModels?: ModelInfo[], preferredProvider?: string): boolean {
+	if (!model) return false;
+	const modelInfo = findModelInfo(model, availableModels, preferredProvider);
+	if (modelInfo) return modelInfo.provider.toLowerCase() === "anthropic";
+	return splitKnownThinkingSuffix(model).baseModel.toLowerCase().startsWith("anthropic/");
+}
+
+export function resolveForkThinkingOverride(
+	forkSafetyInfo: ForkSafetyInfo | undefined,
+	childModel: string | undefined,
+	availableModels?: ModelInfo[],
+	preferredProvider?: string,
+): "off" | undefined {
+	if (!forkSafetyInfo?.sanitized || !forkSafetyInfo.danglingToolUse) return undefined;
+	return childModelIsAnthropic(childModel, availableModels, preferredProvider) ? "off" : undefined;
 }
 
 function readSessionEntries(sessionFile: string): BranchSessionEntry[] {
@@ -124,7 +203,7 @@ export function createForkContextResolver(
 	if (resolveSubagentContext(requestedContext) !== "fork") {
 		return {
 			sessionFileForIndex: () => undefined,
-			thinkingOverrideForIndex: () => undefined,
+			forkSafetyInfoForIndex: () => undefined,
 		};
 	}
 
@@ -161,24 +240,24 @@ export function createForkContextResolver(
 			if (!sessionFile) {
 				throw new Error("Session manager did not return a forked session file.");
 			}
-			let thinkingOverride: "off" | undefined;
+			let safetyInfo: ForkSafetyInfo = { sanitized: false, danglingToolUse: false };
 			if (!fs.existsSync(sessionFile)) {
 				const header = sourceManager.getHeader?.();
 				const entries = sourceManager.getEntries?.();
 				if (!header || !entries) {
 					throw new Error(`Session manager returned a forked session file that does not exist and cannot be persisted by fallback: ${sessionFile}`);
 				}
-				if (sanitizeUnsafeThinkingBlocks(entries)) thinkingOverride = "off";
+				safetyInfo = sanitizeForkEntries(entries);
 				fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
 				fs.writeFileSync(sessionFile, `${[header, ...entries].map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf-8");
 			} else {
 				const entries = readSessionEntries(sessionFile);
-				if (sanitizeUnsafeThinkingBlocks(entries)) {
-					thinkingOverride = "off";
+				safetyInfo = sanitizeForkEntries(entries);
+				if (safetyInfo.sanitized || safetyInfo.danglingToolUse) {
 					fs.writeFileSync(sessionFile, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf-8");
 				}
 			}
-			const resolution = { sessionFile, ...(thinkingOverride ? { thinkingOverride } : {}) };
+			const resolution = { sessionFile, safetyInfo };
 			cachedResolutions.set(index, resolution);
 			return resolution;
 		} catch (error) {
@@ -191,8 +270,8 @@ export function createForkContextResolver(
 		sessionFileForIndex(index = 0): string | undefined {
 			return resolveFork(index).sessionFile;
 		},
-		thinkingOverrideForIndex(index = 0): "off" | undefined {
-			return resolveFork(index).thinkingOverride;
+		forkSafetyInfoForIndex(index = 0): ForkSafetyInfo | undefined {
+			return resolveFork(index).safetyInfo;
 		},
 	};
 }

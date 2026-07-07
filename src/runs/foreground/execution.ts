@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentConfig } from "../../agents/agents.ts";
+import { resolveForkThinkingOverride } from "../../shared/fork-context.ts";
 import {
 	ensureArtifactsDir,
 	getArtifactPaths,
@@ -184,8 +185,9 @@ async function runSingleAttempt(
 		originalTask?: string;
 	},
 ): Promise<SingleResult> {
-	const effectiveThinking = options.thinkingOverride ?? agent.thinking;
-	const modelArg = applyThinkingSuffix(model, effectiveThinking, options.thinkingOverride !== undefined);
+	const thinkingOverride = resolveForkThinkingOverride(options.forkSafetyInfo, model, options.availableModels, options.preferredModelProvider);
+	const effectiveThinking = thinkingOverride ?? agent.thinking;
+	const modelArg = applyThinkingSuffix(model, effectiveThinking, thinkingOverride !== undefined);
 	const { args, env: sharedEnv, tempDir } = buildPiArgs({
 		baseArgs: ["--mode", "json", "-p"],
 		task,

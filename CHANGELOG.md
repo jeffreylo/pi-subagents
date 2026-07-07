@@ -19,6 +19,7 @@
 - Added an opt-in `memory` frontmatter field for agent definitions so recurring custom agents can maintain role-specific durable memory (e.g. a security reviewer accumulating threat-model notes). `memory: { scope: "project" | "user", path: "<name>" }` resolves a safe `agent-memory/` directory, injects the first 200 lines of a `MEMORY.md` into the child system prompt, and falls back to a read-only memory block for agents without write tools. Memory lives under a dedicated namespace that does not conflict with Pi's parent/session/project memory system. Inspired by @tintinweb's pi-subagents.
 
 ### Fixed
+- Narrowed fork-context thinking disablement so sanitized forks keep configured thinking for non-Anthropic children and for Anthropic children unless the fork ends in an interrupted tool-use turn.
 - Scope async subagent completion notifications to the exact owning Pi session so another session in the same repo no longer receives result notices.
 - Harden scheduled-run timestamp parsing and persisted store validation so ambiguous absolute times and corrupted job records fail clearly instead of being normalized or dropped.
 - Derive live-detail and full-notification hints from Pi's configured expand key instead of hard-coding `Ctrl+O`. Thanks to Kylegl (@kylegl) for #364.

@@ -53,6 +53,7 @@ import {
 	Semaphore,
 } from "../shared/parallel-utils.ts";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "../shared/pi-args.ts";
+import { resolveForkThinkingOverride } from "../../shared/fork-context.ts";
 import { outputEntryFromAsyncResult, resolveOutputReferences } from "../shared/chain-outputs.ts";
 import { createStructuredOutputRuntime, readStructuredOutput } from "../shared/structured-output.ts";
 import { collectDynamicResults, DynamicFanoutError, materializeDynamicParallelStep, validateDynamicCollection } from "../shared/dynamic-fanout.ts";
@@ -2151,19 +2152,22 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			}
 
 			const dynamicSteps = materialized.parallel.map((task, itemIndex) => {
-				const thinkingOverride = step.thinkingOverrides?.[itemIndex];
-				const model = thinkingOverride ? applyThinkingSuffix(step.parallel.model, thinkingOverride, true) : step.parallel.model;
-				const thinking = thinkingOverride ? resolveEffectiveThinking(model, thinkingOverride) : undefined;
+				const forkSafetyInfo = step.forkSafetyInfo?.[itemIndex];
+				const applyForkSafetyThinkingSuffix = (candidate: string): string => {
+					const thinkingOverride = resolveForkThinkingOverride(forkSafetyInfo, candidate);
+					return thinkingOverride ? applyThinkingSuffix(candidate, thinkingOverride, true) ?? candidate : candidate;
+				};
+				const model = step.parallel.model ? applyForkSafetyThinkingSuffix(step.parallel.model) : undefined;
+				const modelCandidates = step.parallel.modelCandidates?.map((candidate) => applyForkSafetyThinkingSuffix(candidate));
+				const thinking = resolveEffectiveThinking(model, step.parallel.thinking);
 				return {
 					...step.parallel,
 					task: task.task ?? step.parallel.task,
 					label: task.label ?? step.parallel.label,
 					...(step.sessionFiles?.[itemIndex] ? { sessionFile: step.sessionFiles[itemIndex] } : {}),
-					...(thinkingOverride ? {
-						...(model ? { model } : {}),
-						...(thinking ? { thinking } : {}),
-						...(step.parallel.modelCandidates ? { modelCandidates: step.parallel.modelCandidates.map((candidate) => applyThinkingSuffix(candidate, thinkingOverride, true)) } : {}),
-					} : {}),
+					...(model ? { model } : {}),
+					...(thinking ? { thinking } : {}),
+					...(modelCandidates ? { modelCandidates } : {}),
 					structuredOutput: undefined,
 					structuredOutputSchema: step.parallel.structuredOutputSchema ?? step.parallel.structuredOutput?.schema,
 				};

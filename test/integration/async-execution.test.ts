@@ -1075,7 +1075,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
 			shareEnabled: false,
 			sessionFilesByFlatIndex: [undefined, sessionA, sessionB],
-			thinkingOverridesByFlatIndex: [undefined, "off", "off"],
+			forkSafetyInfoByFlatIndex: [undefined, { sanitized: true, danglingToolUse: true }, { sanitized: true, danglingToolUse: true }],
 			maxSubagentDepth: 2,
 		});
 
@@ -1092,6 +1092,114 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(secondDynamicArgs[secondDynamicArgs.indexOf("--model") + 1], "anthropic/claude-sonnet-4-5:off");
 		assert.deepEqual(status.steps?.slice(1).map((step) => step.sessionFile), [sessionA, sessionB]);
 		assert.deepEqual(status.steps?.slice(1).map((step) => step.thinking), ["off", "off"]);
+	});
+
+	it("async dynamic fanout keeps non-Anthropic candidate thinking while forcing dangling Anthropic fallback off", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }] } });
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "primary failed" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "rate limit exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
+		const id = `async-dynamic-fallback-thinking-off-${Date.now().toString(36)}`;
+		const result = executeAsyncChain(id, {
+			chain: [
+				{ agent: "producer", task: "Produce targets", as: "targets", outputSchema: { type: "object" } },
+				{
+					expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 1 },
+					parallel: {
+						agent: "reviewer",
+						task: "Review {target.path}",
+						label: "Review {target.path}",
+						outputSchema: { type: "object" },
+					},
+					collect: { as: "reviews" },
+					concurrency: 1,
+				},
+			],
+			agents: [makeAgent("producer"), makeAgent("reviewer", { model: "openai/gpt-5-mini:high", fallbackModels: ["anthropic/claude-sonnet-4:low"], thinking: "high" })],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-dynamic" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			forkSafetyInfoByFlatIndex: [undefined, { sanitized: true, danglingToolUse: true }],
+			maxSubagentDepth: 2,
+		});
+
+		assert.ok(!result.isError);
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8"));
+		const firstDynamicArgs = readMockPiArgs(mockPi, 1);
+		const fallbackDynamicArgs = readMockPiArgs(mockPi, 2);
+		assert.equal(payload.success, true);
+		assert.equal(firstDynamicArgs[firstDynamicArgs.indexOf("--model") + 1], "openai/gpt-5-mini:high");
+		assert.equal(fallbackDynamicArgs[fallbackDynamicArgs.indexOf("--model") + 1], "anthropic/claude-sonnet-4:off");
+		assert.deepEqual(payload.results[1].attemptedModels, ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:off"]);
+		assert.equal(status.steps[1].model, "anthropic/claude-sonnet-4:off");
+		assert.equal(status.steps[1].thinking, "off");
+	});
+
+	it("async dynamic fanout forces Anthropic primary off while keeping non-Anthropic fallback thinking", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }] } });
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "primary failed" }],
+					model: "anthropic/claude-sonnet-4",
+					errorMessage: "rate limit exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "review-a", structuredOutput: { ok: "a" } });
+		const id = `async-dynamic-fallback-thinking-mirror-${Date.now().toString(36)}`;
+		const result = executeAsyncChain(id, {
+			chain: [
+				{ agent: "producer", task: "Produce targets", as: "targets", outputSchema: { type: "object" } },
+				{
+					expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 1 },
+					parallel: {
+						agent: "reviewer",
+						task: "Review {target.path}",
+						label: "Review {target.path}",
+						outputSchema: { type: "object" },
+					},
+					collect: { as: "reviews" },
+					concurrency: 1,
+				},
+			],
+			agents: [makeAgent("producer"), makeAgent("reviewer", { model: "anthropic/claude-sonnet-4:low", fallbackModels: ["openai/gpt-5-mini:high"], thinking: "low" })],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-dynamic" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			forkSafetyInfoByFlatIndex: [undefined, { sanitized: true, danglingToolUse: true }],
+			maxSubagentDepth: 2,
+		});
+
+		assert.ok(!result.isError);
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8"));
+		const firstDynamicArgs = readMockPiArgs(mockPi, 1);
+		const fallbackDynamicArgs = readMockPiArgs(mockPi, 2);
+		assert.equal(payload.success, true);
+		assert.equal(firstDynamicArgs[firstDynamicArgs.indexOf("--model") + 1], "anthropic/claude-sonnet-4:off");
+		assert.equal(fallbackDynamicArgs[fallbackDynamicArgs.indexOf("--model") + 1], "openai/gpt-5-mini:high");
+		assert.deepEqual(payload.results[1].attemptedModels, ["anthropic/claude-sonnet-4:off", "openai/gpt-5-mini:high"]);
+		assert.equal(status.steps[1].model, "openai/gpt-5-mini:high");
+		assert.equal(status.steps[1].thinking, "high");
 	});
 
 	it("cancels dynamic fanout aggregate acceptance when the run times out", { skip: !isAsyncAvailable() ? "jiti not available" : process.platform === "win32" ? "timeout signal delivery intermittent on Windows CI" : undefined }, async () => {
@@ -1385,7 +1493,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(mockPi.callCount(), 2);
 	});
 
-	it("background single thinking override replaces primary and fallback suffixes", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+	it("background single keeps non-Anthropic fork thinking while forcing dangling Anthropic fallback off", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({
 			jsonl: [{
 				type: "message_end",
@@ -1424,7 +1532,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			},
 			shareEnabled: false,
 			sessionRoot: path.join(tempDir, "sessions"),
-			thinkingOverride: "off",
+			forkSafetyInfo: { sanitized: true, danglingToolUse: true },
 			maxSubagentDepth: 2,
 		});
 
@@ -1435,9 +1543,64 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const secondArgs = readMockPiArgs(mockPi, 1);
 		assert.equal(payload.success, true);
 		assert.equal(payload.results[0].model, "anthropic/claude-sonnet-4:off");
-		assert.deepEqual(payload.results[0].attemptedModels, ["openai/gpt-5-mini:off", "anthropic/claude-sonnet-4:off"]);
-		assert.equal(firstArgs[firstArgs.indexOf("--model") + 1], "openai/gpt-5-mini:off");
+		assert.deepEqual(payload.results[0].attemptedModels, ["openai/gpt-5-mini:high", "anthropic/claude-sonnet-4:off"]);
+		assert.equal(firstArgs[firstArgs.indexOf("--model") + 1], "openai/gpt-5-mini:high");
 		assert.equal(secondArgs[secondArgs.indexOf("--model") + 1], "anthropic/claude-sonnet-4:off");
+	});
+
+	it("background single forces Anthropic primary off while preserving non-Anthropic fallback thinking", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "primary failed" }],
+					model: "anthropic/claude-sonnet-4",
+					errorMessage: "rate limit exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "Recovered asynchronously" });
+		const id = `async-fallback-thinking-mirror-${Date.now().toString(36)}`;
+		const run = executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Do work",
+			agentConfig: makeAgent("worker", {
+				model: "anthropic/claude-sonnet-4:low",
+				fallbackModels: ["openai/gpt-5-mini:high"],
+				thinking: "low",
+			}),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			availableModels: [
+				{ provider: "openai", id: "gpt-5-mini", fullId: "openai/gpt-5-mini" },
+				{ provider: "anthropic", id: "claude-sonnet-4", fullId: "anthropic/claude-sonnet-4" },
+			],
+			artifactConfig: {
+				enabled: false,
+				includeInput: false,
+				includeOutput: false,
+				includeJsonl: false,
+				includeMetadata: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			forkSafetyInfo: { sanitized: true, danglingToolUse: true },
+			maxSubagentDepth: 2,
+		});
+
+		assert.equal(run.details.asyncId, id);
+		const resultPath = await waitForAsyncResultFile(id);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const firstArgs = readMockPiArgs(mockPi, 0);
+		const secondArgs = readMockPiArgs(mockPi, 1);
+		assert.equal(payload.success, true);
+		assert.equal(payload.results[0].model, "openai/gpt-5-mini:high");
+		assert.deepEqual(payload.results[0].attemptedModels, ["anthropic/claude-sonnet-4:off", "openai/gpt-5-mini:high"]);
+		assert.equal(firstArgs[firstArgs.indexOf("--model") + 1], "anthropic/claude-sonnet-4:off");
+		assert.equal(secondArgs[secondArgs.indexOf("--model") + 1], "openai/gpt-5-mini:high");
 	});
 
 	it("background runs retry fallback models when a zero-exit attempt has empty output", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {

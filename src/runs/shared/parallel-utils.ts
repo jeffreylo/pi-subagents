@@ -1,3 +1,5 @@
+import type { ForkSafetyInfo } from "../../shared/fork-context.ts";
+
 export interface RunnerSubagentStep {
 	/** Session id of the direct parent session for permission-system ask forwarding. */
 	parentSessionId?: string;
@@ -56,7 +58,7 @@ export interface DynamicRunnerGroup {
 	phase?: string;
 	label?: string;
 	sessionFiles?: (string | undefined)[];
-	thinkingOverrides?: (string | undefined)[];
+	forkSafetyInfo?: (ForkSafetyInfo | undefined)[];
 	effectiveAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
 }
 
