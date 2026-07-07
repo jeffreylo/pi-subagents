@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { createForkContextResolver, resolveSubagentContext } from "../../src/shared/fork-context.ts";
+import { createForkContextResolver, resolveForkThinkingOverride, resolveSubagentContext } from "../../src/shared/fork-context.ts";
 
 function writeMinimalSessionFile(filePath: string, id = "session"): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -43,7 +43,7 @@ describe("createForkContextResolver", () => {
 		});
 
 		assert.equal(resolver.sessionFileForIndex(0), undefined);
-		assert.equal(resolver.thinkingOverrideForIndex(0), undefined);
+		assert.equal(resolveForkThinkingOverride(resolver.forkSafetyInfoForIndex(0), "anthropic/claude-sonnet-5"), undefined);
 		assert.equal(calls, 0);
 	});
 
@@ -334,12 +334,200 @@ describe("createForkContextResolver", () => {
 			});
 
 			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
-			assert.equal(resolver.thinkingOverrideForIndex(0), "off");
+			assert.deepEqual(resolver.forkSafetyInfoForIndex(0), { sanitized: true, danglingToolUse: false });
+			assert.equal(resolveForkThinkingOverride(resolver.forkSafetyInfoForIndex(0), "anthropic/claude-sonnet-5"), undefined);
+			assert.equal(resolveForkThinkingOverride(resolver.forkSafetyInfoForIndex(0), "openai/gpt-5.5"), undefined);
 			const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
 			assert.deepEqual(entries[2].message.content, [{ type: "text", text: "answer" }]);
+			assert.equal(entries.length, 3);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("forces thinking off only for sanitized dangling Anthropic tool-use forks", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-dangling-tool-use-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const childSessionFile = path.join(tempDir, "child.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			writeSessionJsonl(childSessionFile, [
+				{ type: "session", version: 1, id: "child", timestamp: "2026-04-16T00:00:00.000Z", cwd: "/tmp", parentSession: parentSessionFile },
+				{ type: "message", id: "user-1", parentId: null, timestamp: "2026-04-16T00:00:01.000Z", message: { role: "user", content: "prompt" } },
+				{ type: "message", id: "assistant-1", parentId: "user-1", timestamp: "2026-04-16T00:00:02.000Z", message: { role: "assistant", provider: "anthropic", api: "anthropic-messages", model: "anthropic/claude-sonnet-5", content: [{ type: "thinking", thinking: "private chain", thinkingSignature: "signed" }, { type: "tool_use", id: "toolu_1", name: "read", input: { path: "package.json" } }] } },
+			]);
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "assistant-1",
+			}, "fork", {
+				openSession: () => ({
+					createBranchedSession: () => childSessionFile,
+				}),
+			});
+
+			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
+			assert.deepEqual(resolver.forkSafetyInfoForIndex(0), { sanitized: true, danglingToolUse: true });
+			assert.equal(resolveForkThinkingOverride(resolver.forkSafetyInfoForIndex(0), "anthropic/claude-sonnet-5"), "off");
+			assert.equal(resolveForkThinkingOverride(resolver.forkSafetyInfoForIndex(0), "openai/gpt-5.5"), undefined);
+			const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.deepEqual(entries[2].message.content, [{ type: "tool_use", id: "toolu_1", name: "read", input: { path: "package.json" } }]);
 			assert.equal(entries[3].type, "thinking_level_change");
 			assert.equal(entries[3].thinkingLevel, "off");
 			assert.equal(entries[3].parentId, "assistant-1");
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("treats partially answered parallel tool-use turns as dangling", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-partial-tool-results-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const childSessionFile = path.join(tempDir, "child.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			writeSessionJsonl(childSessionFile, [
+				{ type: "session", version: 1, id: "child", timestamp: "2026-04-16T00:00:00.000Z", cwd: "/tmp", parentSession: parentSessionFile },
+				{ type: "message", id: "user-1", parentId: null, timestamp: "2026-04-16T00:00:01.000Z", message: { role: "user", content: "prompt" } },
+				{ type: "message", id: "assistant-1", parentId: "user-1", timestamp: "2026-04-16T00:00:02.000Z", message: { role: "assistant", provider: "anthropic", api: "anthropic-messages", model: "anthropic/claude-sonnet-5", content: [{ type: "thinking", thinking: "private chain", thinkingSignature: "signed" }, { type: "tool_use", id: "toolu_1", name: "read", input: { path: "a.txt" } }, { type: "tool_use", id: "toolu_2", name: "read", input: { path: "b.txt" } }] } },
+				{ type: "message", id: "tool-result-1", parentId: "assistant-1", timestamp: "2026-04-16T00:00:03.000Z", message: { role: "toolResult", toolCallId: "toolu_1", content: [{ type: "text", text: "a" }] } },
+			]);
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "tool-result-1",
+			}, "fork", {
+				openSession: () => ({
+					createBranchedSession: () => childSessionFile,
+				}),
+			});
+
+			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
+			assert.deepEqual(resolver.forkSafetyInfoForIndex(0), { sanitized: true, danglingToolUse: true });
+			assert.equal(resolveForkThinkingOverride(resolver.forkSafetyInfoForIndex(0), "anthropic/claude-sonnet-5"), "off");
+			const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(entries[4].type, "thinking_level_change");
+			assert.equal(entries[4].thinkingLevel, "off");
+			assert.equal(entries[4].parentId, "tool-result-1");
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not treat fully answered parallel tool-use turns as dangling", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-complete-tool-results-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const childSessionFile = path.join(tempDir, "child.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			writeSessionJsonl(childSessionFile, [
+				{ type: "session", version: 1, id: "child", timestamp: "2026-04-16T00:00:00.000Z", cwd: "/tmp", parentSession: parentSessionFile },
+				{ type: "message", id: "user-1", parentId: null, timestamp: "2026-04-16T00:00:01.000Z", message: { role: "user", content: "prompt" } },
+				{ type: "message", id: "assistant-1", parentId: "user-1", timestamp: "2026-04-16T00:00:02.000Z", message: { role: "assistant", provider: "anthropic", api: "anthropic-messages", model: "anthropic/claude-sonnet-5", content: [{ type: "thinking", thinking: "private chain", thinkingSignature: "signed" }, { type: "tool_use", id: "toolu_1", name: "read", input: { path: "a.txt" } }, { type: "tool_use", id: "toolu_2", name: "read", input: { path: "b.txt" } }] } },
+				{ type: "message", id: "tool-result-1", parentId: "assistant-1", timestamp: "2026-04-16T00:00:03.000Z", message: { role: "toolResult", toolCallId: "toolu_1", content: [{ type: "text", text: "a" }] } },
+				{ type: "message", id: "tool-result-2", parentId: "tool-result-1", timestamp: "2026-04-16T00:00:04.000Z", message: { role: "toolResult", toolCallId: "toolu_2", content: [{ type: "text", text: "b" }] } },
+			]);
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "tool-result-2",
+			}, "fork", {
+				openSession: () => ({
+					createBranchedSession: () => childSessionFile,
+				}),
+			});
+
+			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
+			assert.deepEqual(resolver.forkSafetyInfoForIndex(0), { sanitized: true, danglingToolUse: false });
+			assert.equal(resolveForkThinkingOverride(resolver.forkSafetyInfoForIndex(0), "anthropic/claude-sonnet-5"), undefined);
+			const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(entries.length, 5);
+			assert.deepEqual(entries[2].message.content, [{ type: "tool_use", id: "toolu_1", name: "read", input: { path: "a.txt" } }, { type: "tool_use", id: "toolu_2", name: "read", input: { path: "b.txt" } }]);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not mark a minimal forked session as sanitized or dangling", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-minimal-session-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const childSessionFile = path.join(tempDir, "child.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			writeSessionJsonl(childSessionFile, [
+				{ type: "session", version: 1, id: "child", timestamp: "2026-04-16T00:00:00.000Z", cwd: "/tmp", parentSession: parentSessionFile },
+				{ type: "message", id: "user-1", parentId: null, timestamp: "2026-04-16T00:00:01.000Z", message: { role: "user", content: "prompt" } },
+			]);
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "user-1",
+			}, "fork", {
+				openSession: () => ({
+					createBranchedSession: () => childSessionFile,
+				}),
+			});
+
+			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
+			assert.deepEqual(resolver.forkSafetyInfoForIndex(0), { sanitized: false, danglingToolUse: false });
+			assert.equal(resolveForkThinkingOverride(resolver.forkSafetyInfoForIndex(0), "anthropic/claude-sonnet-5"), undefined);
+			const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(entries.length, 2);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not treat prior tool-use turns as dangling after a trailing user message", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-trailing-user-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const childSessionFile = path.join(tempDir, "child.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			writeSessionJsonl(childSessionFile, [
+				{ type: "session", version: 1, id: "child", timestamp: "2026-04-16T00:00:00.000Z", cwd: "/tmp", parentSession: parentSessionFile },
+				{ type: "message", id: "user-1", parentId: null, timestamp: "2026-04-16T00:00:01.000Z", message: { role: "user", content: "prompt" } },
+				{ type: "message", id: "assistant-1", parentId: "user-1", timestamp: "2026-04-16T00:00:02.000Z", message: { role: "assistant", provider: "anthropic", api: "anthropic-messages", model: "anthropic/claude-sonnet-5", content: [{ type: "thinking", thinking: "private chain", thinkingSignature: "signed" }, { type: "tool_use", id: "toolu_1", name: "read", input: { path: "a.txt" } }] } },
+				{ type: "message", id: "user-2", parentId: "assistant-1", timestamp: "2026-04-16T00:00:03.000Z", message: { role: "user", content: "new task" } },
+			]);
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "user-2",
+			}, "fork", {
+				openSession: () => ({
+					createBranchedSession: () => childSessionFile,
+				}),
+			});
+
+			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
+			assert.deepEqual(resolver.forkSafetyInfoForIndex(0), { sanitized: true, danglingToolUse: false });
+			assert.equal(resolveForkThinkingOverride(resolver.forkSafetyInfoForIndex(0), "anthropic/claude-sonnet-5"), undefined);
+			const entries = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+			assert.equal(entries.length, 4);
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("treats tool-use blocks without ids as dangling", () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-fork-idless-tool-use-"));
+		try {
+			const parentSessionFile = path.join(tempDir, "parent.jsonl");
+			const childSessionFile = path.join(tempDir, "child.jsonl");
+			writeMinimalSessionFile(parentSessionFile, "parent");
+			writeSessionJsonl(childSessionFile, [
+				{ type: "session", version: 1, id: "child", timestamp: "2026-04-16T00:00:00.000Z", cwd: "/tmp", parentSession: parentSessionFile },
+				{ type: "message", id: "user-1", parentId: null, timestamp: "2026-04-16T00:00:01.000Z", message: { role: "user", content: "prompt" } },
+				{ type: "message", id: "assistant-1", parentId: "user-1", timestamp: "2026-04-16T00:00:02.000Z", message: { role: "assistant", provider: "anthropic", api: "anthropic-messages", model: "anthropic/claude-sonnet-5", content: [{ type: "thinking", thinking: "private chain", thinkingSignature: "signed" }, { type: "tool_use", name: "read", input: { path: "package.json" } }] } },
+			]);
+			const resolver = createForkContextResolver({
+				getSessionFile: () => parentSessionFile,
+				getLeafId: () => "assistant-1",
+			}, "fork", {
+				openSession: () => ({
+					createBranchedSession: () => childSessionFile,
+				}),
+			});
+
+			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
+			assert.deepEqual(resolver.forkSafetyInfoForIndex(0), { sanitized: true, danglingToolUse: true });
+			assert.equal(resolveForkThinkingOverride(resolver.forkSafetyInfoForIndex(0), "anthropic/claude-sonnet-5"), "off");
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -365,7 +553,7 @@ describe("createForkContextResolver", () => {
 			});
 
 			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
-			assert.equal(resolver.thinkingOverrideForIndex(0), undefined);
+			assert.equal(resolveForkThinkingOverride(resolver.forkSafetyInfoForIndex(0), "anthropic/claude-sonnet-5"), undefined);
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -391,7 +579,7 @@ describe("createForkContextResolver", () => {
 			});
 
 			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
-			assert.equal(resolver.thinkingOverrideForIndex(0), undefined);
+			assert.equal(resolveForkThinkingOverride(resolver.forkSafetyInfoForIndex(0), "anthropic/claude-sonnet-5"), undefined);
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -420,12 +608,11 @@ describe("createForkContextResolver", () => {
 			});
 
 			assert.equal(resolver.sessionFileForIndex(0), childSessionFile);
-			assert.equal(resolver.thinkingOverrideForIndex(0), "off");
+			assert.deepEqual(resolver.forkSafetyInfoForIndex(0), { sanitized: true, danglingToolUse: false });
+			assert.equal(resolveForkThinkingOverride(resolver.forkSafetyInfoForIndex(0), "anthropic/claude-sonnet-5"), undefined);
 			const written = fs.readFileSync(childSessionFile, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
 			assert.deepEqual(written[2].message.content, [{ type: "text", text: "answer" }]);
-			assert.equal(written[3].type, "thinking_level_change");
-			assert.equal(written[3].thinkingLevel, "off");
-			assert.equal(written[3].parentId, "assistant-1");
+			assert.equal(written.length, 3);
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}

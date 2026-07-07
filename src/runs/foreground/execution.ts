@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentConfig } from "../../agents/agents.ts";
+import { resolveForkThinkingOverride } from "../../shared/fork-context.ts";
 import {
 	ensureArtifactsDir,
 	getArtifactPaths,
@@ -193,8 +194,9 @@ async function runSingleAttempt(
 		originalTask?: string;
 	},
 ): Promise<SingleResult> {
-	const effectiveThinking = options.thinkingOverride ?? agent.thinking;
-	const modelArg = applyThinkingSuffix(model, effectiveThinking, options.thinkingOverride !== undefined);
+	const forkThinkingOverride = resolveForkThinkingOverride(options.forkSafetyInfo, model, options.availableModels, options.preferredModelProvider);
+	const effectiveThinking = forkThinkingOverride ?? options.thinkingOverride ?? agent.thinking;
+	const modelArg = applyThinkingSuffix(model, effectiveThinking, forkThinkingOverride !== undefined || options.thinkingOverride !== undefined);
 	const watchdogConfig = resolveWatchdogConfig(options.cwd ?? runtimeCwd);
 	const childWatchdog = watchdogConfig.ok
 		? resolveChildWatchdogConfig({

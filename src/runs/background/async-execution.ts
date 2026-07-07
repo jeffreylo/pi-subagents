@@ -21,6 +21,7 @@ import { PI_CODING_AGENT_PACKAGE_ROOT_ENV, resolveChildCwd } from "../../shared/
 import { buildModelCandidates, resolveModelCandidate, resolveSubagentModelOverride, type AvailableModelInfo, type ParentModel } from "../shared/model-fallback.ts";
 import type { ModelScopeConfig } from "../shared/model-scope.ts";
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
+import { resolveForkThinkingOverride, type ForkSafetyInfo } from "../../shared/fork-context.ts";
 import { resolveExpectedWorktreeAgentCwd } from "../shared/worktree.ts";
 import { buildWorkflowGraphSnapshot } from "../shared/workflow-graph.ts";
 import { ChainOutputValidationError, validateChainOutputBindings } from "../shared/chain-outputs.ts";
@@ -126,7 +127,7 @@ interface AsyncChainParams {
 	sessionRoot?: string;
 	chainSkills?: string[];
 	sessionFilesByFlatIndex?: (string | undefined)[];
-	thinkingOverridesByFlatIndex?: (AgentConfig["thinking"] | undefined)[];
+	forkSafetyInfoByFlatIndex?: (ForkSafetyInfo | undefined)[];
 	progressDir?: string;
 	dynamicFanoutMaxItems?: number;
 	maxSubagentDepth: number;
@@ -164,6 +165,7 @@ interface AsyncSingleParams {
 	outputBaseDir?: string;
 	modelOverride?: string;
 	thinkingOverride?: AgentConfig["thinking"];
+	forkSafetyInfo?: ForkSafetyInfo;
 	availableModels?: AvailableModelInfo[];
 	maxSubagentDepth: number;
 	worktreeSetupHook?: string;
@@ -197,7 +199,7 @@ export interface AsyncRunnerStepBuildParams {
 	cwd?: string;
 	chainSkills?: string[];
 	sessionFilesByFlatIndex?: (string | undefined)[];
-	thinkingOverridesByFlatIndex?: (AgentConfig["thinking"] | undefined)[];
+	forkSafetyInfoByFlatIndex?: (ForkSafetyInfo | undefined)[];
 	progressDir?: string;
 	dynamicFanoutMaxItems?: number;
 	maxSubagentDepth: number;
@@ -356,7 +358,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 		ctx,
 		cwd,
 		sessionFilesByFlatIndex,
-		thinkingOverridesByFlatIndex,
+		forkSafetyInfoByFlatIndex,
 		maxSubagentDepth,
 		worktreeBaseDir,
 		asyncDir,
@@ -418,6 +420,11 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			...(s.model ? { model: s.model } : {}),
 		};
 	};
+	const applyForkSafetyThinkingSuffix = (candidate: string, configuredThinking: AgentConfig["thinking"], forkSafetyInfo: ForkSafetyInfo | undefined): string => {
+		const thinkingOverride = resolveForkThinkingOverride(forkSafetyInfo, candidate, availableModels, ctx.currentModelProvider);
+		return applyThinkingSuffix(candidate, thinkingOverride ?? configuredThinking, thinkingOverride !== undefined) ?? candidate;
+	};
+
 	const buildSeqStep = (s: SequentialStep, sessionFile?: string, behaviorCwd?: string, progressPrecreated = false, resolvedBehavior?: ResolvedStepBehavior, flatIndex?: number) => {
 		const a = agents.find((x) => x.name === s.agent)!;
 		const toolBudgetInput = s.toolBudget ?? params.toolBudget ?? a.toolBudget ?? params.configToolBudget;
@@ -455,9 +462,8 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 
 		const requestedModel = behavior.model ?? a.model;
 		const primaryModel = resolveSubagentModelOverride(requestedModel, ctx.currentModel, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope, source: behavior.model ? "explicit" : "inherited" });
-		const thinkingOverride = flatIndex === undefined ? undefined : thinkingOverridesByFlatIndex?.[flatIndex];
-		const effectiveThinking = thinkingOverride ?? a.thinking;
-		const model = applyThinkingSuffix(primaryModel, effectiveThinking, thinkingOverride !== undefined);
+		const forkSafetyInfo = flatIndex === undefined ? undefined : forkSafetyInfoByFlatIndex?.[flatIndex];
+		const model = primaryModel ? applyForkSafetyThinkingSuffix(primaryModel, a.thinking, forkSafetyInfo) : undefined;
 		return {
 			parentSessionId: ctx.parentSessionId ?? ctx.currentSessionId,
 			agent: s.agent,
@@ -468,9 +474,9 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			structured: Boolean(s.outputSchema),
 			cwd: stepCwd,
 			model,
-			thinking: resolveEffectiveThinking(model, effectiveThinking),
+			thinking: resolveEffectiveThinking(model, a.thinking),
 			modelCandidates: buildModelCandidates(primaryModel, a.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope }).map((candidate) =>
-				applyThinkingSuffix(candidate, effectiveThinking, thinkingOverride !== undefined),
+				applyForkSafetyThinkingSuffix(candidate, a.thinking, forkSafetyInfo),
 			),
 			tools: a.tools,
 			extensions: a.extensions,
@@ -501,15 +507,15 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 	};
 
 	let flatStepIndex = 0;
-	const nextFlatStep = (): { index: number; sessionFile?: string; thinkingOverride?: AgentConfig["thinking"] } => {
+	const nextFlatStep = (): { index: number; sessionFile?: string; forkSafetyInfo?: ForkSafetyInfo } => {
 		const index = flatStepIndex;
 		const sessionFile = sessionFilesByFlatIndex?.[flatStepIndex];
-		const thinkingOverride = thinkingOverridesByFlatIndex?.[flatStepIndex];
+		const forkSafetyInfo = forkSafetyInfoByFlatIndex?.[flatStepIndex];
 		flatStepIndex++;
 		return {
 			index,
 			...(sessionFile ? { sessionFile } : {}),
-			...(thinkingOverride ? { thinkingOverride } : {}),
+			...(forkSafetyInfo ? { forkSafetyInfo } : {}),
 		};
 	};
 
@@ -562,7 +568,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 					phase: s.phase,
 					label: s.label,
 					sessionFiles: dynamicFlatSteps.map((step) => step.sessionFile),
-					thinkingOverrides: dynamicFlatSteps.map((step) => step.thinkingOverride),
+					forkSafetyInfo: dynamicFlatSteps.map((step) => step.forkSafetyInfo),
 					effectiveAcceptance: resolveEffectiveAcceptance({
 						explicit: s.acceptance,
 						agentName: s.parallel.agent,
@@ -617,7 +623,7 @@ export function executeAsyncChain(
 		shareEnabled,
 		sessionRoot,
 		sessionFilesByFlatIndex,
-		thinkingOverridesByFlatIndex,
+		forkSafetyInfoByFlatIndex,
 		maxSubagentDepth,
 		worktreeSetupHook,
 		worktreeSetupHookTimeoutMs,
@@ -655,7 +661,7 @@ export function executeAsyncChain(
 		cwd,
 		chainSkills: params.chainSkills,
 		sessionFilesByFlatIndex,
-		thinkingOverridesByFlatIndex,
+		forkSafetyInfoByFlatIndex,
 		progressDir: params.progressDir ?? (artifactsDir ? path.join(artifactsDir, "progress", id) : resultMode === "parallel" ? path.join(asyncDir, "progress") : undefined),
 		outputBaseDir: artifactsDir ? path.join(artifactsDir, "outputs", id) : undefined,
 		dynamicFanoutMaxItems: params.dynamicFanoutMaxItems,
@@ -916,8 +922,12 @@ export function executeAsyncSingle(
 		availableModels,
 		ctx.currentModelProvider,
 	);
-	const effectiveThinking = params.thinkingOverride ?? agentConfig.thinking;
-	const model = applyThinkingSuffix(primaryModel, effectiveThinking, params.thinkingOverride !== undefined);
+	const configuredThinking = params.thinkingOverride ?? agentConfig.thinking;
+	const applyForkSafetyThinkingSuffix = (candidate: string): string => {
+		const forkThinkingOverride = resolveForkThinkingOverride(params.forkSafetyInfo, candidate, availableModels, ctx.currentModelProvider);
+		return applyThinkingSuffix(candidate, forkThinkingOverride ?? configuredThinking, forkThinkingOverride !== undefined || params.thinkingOverride !== undefined) ?? candidate;
+	};
+	const model = primaryModel ? applyForkSafetyThinkingSuffix(primaryModel) : undefined;
 	const toolBudgetInput = params.toolBudget ?? agentConfig.toolBudget ?? params.configToolBudget;
 	const resolvedToolBudget = validateToolBudgetConfig(toolBudgetInput, params.toolBudget ? "toolBudget" : agentConfig.toolBudget ? "agent.toolBudget" : "config.toolBudget");
 	if (resolvedToolBudget.error) return formatAsyncStartError("single", resolvedToolBudget.error);
@@ -935,9 +945,9 @@ export function executeAsyncSingle(
 						task: taskWithOutputInstruction,
 						cwd: runnerCwd,
 						model,
-						thinking: resolveEffectiveThinking(model, effectiveThinking),
+						thinking: resolveEffectiveThinking(model, configuredThinking),
 						modelCandidates: buildModelCandidates(primaryModel, agentConfig.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope }).map((candidate) =>
-							applyThinkingSuffix(candidate, effectiveThinking, params.thinkingOverride !== undefined),
+							applyForkSafetyThinkingSuffix(candidate),
 						),
 						tools: agentConfig.tools,
 						extensions: agentConfig.extensions,

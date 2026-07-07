@@ -9,6 +9,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../../agents/agents.ts";
 import { ChainClarifyComponent, type ChainClarifyResult, type BehaviorOverride } from "./chain-clarify.ts";
 import { toModelInfo, type ModelInfo } from "../../shared/model-info.ts";
+import type { ForkSafetyInfo } from "../../shared/fork-context.ts";
 import {
 	resolveChainTemplates,
 	createChainDir,
@@ -110,7 +111,7 @@ interface ParallelChainRunInput {
 	sessionDirForIndex: (idx?: number) => string | undefined;
 	sessionFileForIndex?: (idx?: number) => string | undefined;
 	sessionFileForTask?: (agentName: string, idx?: number) => string | undefined;
-	thinkingOverrideForTask?: (agentName: string, idx?: number) => AgentConfig["thinking"] | undefined;
+	forkSafetyInfoForTask?: (agentName: string, idx?: number) => ForkSafetyInfo | undefined;
 	shareEnabled: boolean;
 	artifactConfig: ArtifactConfig;
 	artifactsDir: string;
@@ -312,7 +313,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				sessionDir: input.sessionDirForIndex(input.globalTaskIndex + taskIndex),
 				sessionFile: input.sessionFileForTask?.(task.agent, input.globalTaskIndex + taskIndex)
 					?? input.sessionFileForIndex?.(input.globalTaskIndex + taskIndex),
-				thinkingOverride: input.thinkingOverrideForTask?.(task.agent, input.globalTaskIndex + taskIndex),
+				forkSafetyInfo: input.forkSafetyInfoForTask?.(task.agent, input.globalTaskIndex + taskIndex),
 				share: input.shareEnabled,
 				artifactsDir: input.artifactConfig.enabled ? input.artifactsDir : undefined,
 				artifactConfig: input.artifactConfig,
@@ -413,7 +414,7 @@ interface ChainExecutionParams {
 	sessionDirForIndex: (idx?: number) => string | undefined;
 	sessionFileForIndex?: (idx?: number) => string | undefined;
 	sessionFileForTask?: (agentName: string, idx?: number) => string | undefined;
-	thinkingOverrideForTask?: (agentName: string, idx?: number) => AgentConfig["thinking"] | undefined;
+	forkSafetyInfoForTask?: (agentName: string, idx?: number) => ForkSafetyInfo | undefined;
 	artifactsDir: string;
 	artifactConfig: ArtifactConfig;
 	includeProgress?: boolean;
@@ -481,7 +482,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 		sessionDirForIndex,
 		sessionFileForIndex,
 		sessionFileForTask,
-		thinkingOverrideForTask,
+		forkSafetyInfoForTask,
 		artifactsDir,
 		artifactConfig,
 		includeProgress,
@@ -716,7 +717,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					sessionDirForIndex,
 					sessionFileForIndex,
 					sessionFileForTask,
-					thinkingOverrideForTask,
+					forkSafetyInfoForTask,
 					shareEnabled,
 					artifactConfig,
 					artifactsDir,
@@ -936,7 +937,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				sessionDirForIndex,
 				sessionFileForIndex,
 				sessionFileForTask,
-				thinkingOverrideForTask,
+				forkSafetyInfoForTask,
 				shareEnabled,
 				artifactConfig,
 				artifactsDir,
@@ -1174,7 +1175,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				sessionDir: sessionDirForIndex(childIndex),
 				sessionFile: sessionFileForTask?.(seqStep.agent, childIndex)
 					?? sessionFileForIndex?.(childIndex),
-				thinkingOverride: thinkingOverrideForTask?.(seqStep.agent, childIndex),
+				forkSafetyInfo: forkSafetyInfoForTask?.(seqStep.agent, childIndex),
 				share: shareEnabled,
 				artifactsDir: artifactConfig.enabled ? artifactsDir : undefined,
 				artifactConfig,

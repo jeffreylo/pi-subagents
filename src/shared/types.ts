@@ -8,6 +8,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import type { FSWatcher } from "node:fs";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ModelScopeConfig } from "../runs/shared/model-scope.ts";
+import type { ForkSafetyInfo } from "./fork-context.ts";
 
 // ============================================================================
 // Basic Types
@@ -967,8 +968,10 @@ export interface RunSyncOptions {
 	nestedRoute?: NestedRouteInfo;
 	/** Override the agent's default model (format: "provider/id" or just "id") */
 	modelOverride?: string;
-	/** Override the agent's default thinking level for this run */
+	/** Override the agent's default thinking level for this run. */
 	thinkingOverride?: AgentConfig["thinking"];
+	/** Forked session safety metadata used to decide whether child thinking must be disabled. */
+	forkSafetyInfo?: ForkSafetyInfo;
 	/** Registry models available for heuristic bare-model resolution */
 	availableModels?: Array<{ provider: string; id: string; fullId: string }>;
 	/** Current parent-session provider to prefer for ambiguous bare model ids */
