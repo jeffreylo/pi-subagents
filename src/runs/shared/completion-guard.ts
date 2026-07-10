@@ -9,11 +9,11 @@ const REVIEW_ONLY_PATTERNS = [
 ];
 
 const REVIEWER_REQUIRED_EDIT_PATTERNS = [
-	/\bmust\s+(?:edit|modify|change|fix|patch|apply)\b/i,
-	/\brequired\s+to\s+(?:edit|modify|change|fix|patch|apply)\b/i,
+	/\bmust\s+(?<!-)(?:edit|modify|change|fix|patch|apply)\b/i,
+	/\brequired\s+to\s+(?<!-)(?:edit|modify|change|fix|patch|apply)\b/i,
 	/\bregardless\s+of\s+findings\b/i,
-	/\balways\s+(?:edit|modify|change|fix|patch|apply)\b/i,
-	/\bapply\s+(?:the\s+)?fix(?:es)?\s+directly\b/i,
+	/\balways\s+(?<!-)(?:edit|modify|change|fix|patch|apply)\b/i,
+	/(?<!-)\bapply\s+(?:the\s+)?fix(?:es)?\s+directly\b/i,
 	/\bmake\s+(?:the\s+)?code\s+changes\b/i,
 ];
 
@@ -22,6 +22,9 @@ const EXPLICIT_NO_EDIT_PATTERNS = [
 	/\bdon't edit\b/i,
 	/\bdo not modify\b/i,
 	/\bdo not change files\b/i,
+	/\bno file edits? (?:are )?expected\b/i,
+	/\bno file changes? (?:are )?expected\b/i,
+	/\bno edits? (?:are )?expected\b/i,
 ];
 
 const SCOPED_NO_EDIT_CONSTRAINT_PATTERNS = [
@@ -55,21 +58,21 @@ const RESEARCH_AGENT_PATTERNS = [
 const FIX_OR_PATCH_IMPLEMENTATION_PATTERN = /\b(?:fix|patch)\s+(?:(?:it|this|that|them|each|any|all|these|those)\b|(?:(?:a|an|the|any|all)\s+)?(?:(?:failing|failed|broken|flaky|red|cold|start|current|existing|reported|approved|known|regression|unit|integration|e2e|source|typescript|type-?script|ts|type-?check|compiler)\s+)*(?:bug|defect|issues?|problems?|failures?|regressions?|tests?|errors?|items?|typos?|code|source|implementation|component|function|module|class|method|logic|file|files|readme|docs?|changelog|package\.json|config|manifest|extension|prompt|command|lint(?:ing)?|build|ci|type-?check|type\s+checking)\b)/i;
 
 const WORKER_IMPLEMENTATION_PATTERNS = [
-	/\b(?:implement|edit|modify|refactor|delete)\b/i,
+	/(?<!-)\b(?:implement|edit|modify|refactor|delete)\b/i,
 	FIX_OR_PATCH_IMPLEMENTATION_PATTERN,
-	/\b(?:update|add|remove|replace|create)\b(?!\s+(?:(?:a|an|the)\s+)?(?:report|summary|findings?)(?:\b|$))/i,
-	/\bapply\s+(?:the\s+)?(?:(?:suggested|proposed|recommended)\s+)?(?:changes?|fix(?:es)?|patch)\b/i,
-	/\bmake\s+(?:the\s+)?changes\b/i,
+	/(?<!-)\b(?:update|add|remove|replace|create)\b(?!\s+(?:(?:a|an|the)\s+)?(?:report|summary|findings?)(?:\b|$))/i,
+	/(?<!-)\bapply\s+(?:the\s+)?(?:(?:suggested|proposed|recommended)\s+)?(?:changes?|fix(?:es)?|patch)\b/i,
+	/(?<!-)\bmake\s+(?:the\s+)?changes\b/i,
 	/\bdo those fixes\b/i,
 ];
 
 const GENERAL_IMPLEMENTATION_PATTERNS = [
-	/\b(?:implement|edit|modify|refactor)\b/i,
+	/(?<!-)\b(?:implement|edit|modify|refactor)\b/i,
 	FIX_OR_PATCH_IMPLEMENTATION_PATTERN,
-	/\bapply\s+(?:the\s+)?(?:(?:suggested|proposed|recommended)\s+)?(?:changes?|fix(?:es)?|patch)\b/i,
-	/\bmake\s+(?:the\s+)?changes\b/i,
+	/(?<!-)\bapply\s+(?:the\s+)?(?:(?:suggested|proposed|recommended)\s+)?(?:changes?|fix(?:es)?|patch)\b/i,
+	/(?<!-)\bmake\s+(?:the\s+)?changes\b/i,
 	/\bdo those fixes\b/i,
-	/\b(?:update|add|remove|replace|delete|create)\s+(?:the\s+)?(?:file|files|code|source|implementation|test|tests|component|function|module|class|method|logic|import|imports|readme|docs?|changelog|package\.json|config|manifest|extension|prompt|command)\b/i,
+	/(?<!-)\b(?:update|add|remove|replace|delete|create)\s+(?:the\s+)?(?:file|files|code|source|implementation|test|tests|component|function|module|class|method|logic|import|imports|readme|docs?|changelog|package\.json|config|manifest|extension|prompt|command)\b/i,
 ];
 
 const READ_ONLY_BUILTIN_TOOLS = new Set([

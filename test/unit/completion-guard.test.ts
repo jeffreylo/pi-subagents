@@ -145,12 +145,29 @@ test("non-worker implementation tasks still expect mutation", () => {
 	assert.equal(expectsImplementationMutation("worker", "Draft a GitHub issue, then implement the fix"), true);
 });
 
+test("merge-only task with CLI flags and explicit no-edit wording does not count as source-edit intent", () => {
+	const task = "gh pr merge 113 --rebase --delete-branch\n\nThis is a metadata/merge task; no file edits are expected.";
+	assert.equal(expectsImplementationMutation("worker", task), false);
+	assert.equal(evaluateCompletionMutationGuard({
+		agent: "worker",
+		task,
+		messages: [assistantText("Merged PR 113")],
+	}).triggered, false);
+	assert.equal(expectsImplementationMutation("worker", "Run gh pr merge 113 --rebase --delete-branch"), false);
+	assert.equal(expectsImplementationMutation("worker", "Run the command with --fix and --delete-branch"), false);
+});
+
+
 test("worker edit intent covers common docs, config, and source tasks", () => {
 	assert.equal(expectsImplementationMutation("worker", "Update README to mention the native tool"), true);
 	assert.equal(expectsImplementationMutation("worker", "Remove share functionality and all Vercel references"), true);
 	assert.equal(expectsImplementationMutation("worker", "Replace the registered command with a render tool"), true);
 	assert.equal(expectsImplementationMutation("worker", "Create completion-guard.ts"), true);
 	assert.equal(expectsImplementationMutation("worker", "Add tests for the completion guard"), true);
+	assert.equal(expectsImplementationMutation("worker", "Delete the obsolete source file"), true);
+	assert.equal(expectsImplementationMutation("worker", "Edit src/index.ts to fix the bug"), true);
+	assert.equal(expectsImplementationMutation("worker", "Metadata-only change: update package.json version"), true);
+	assert.equal(expectsImplementationMutation("worker", "Update metadata in package.json"), true);
 	assert.equal(expectsImplementationMutation("worker", "Implement the approved fixes. Do not edit files outside this repo."), true);
 	assert.equal(expectsImplementationMutation("worker", "Implement the fix. Do not edit unrelated files."), true);
 });

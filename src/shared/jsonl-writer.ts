@@ -8,19 +8,24 @@ export interface DrainableSource {
 export interface JsonlWriteStream {
 	write(chunk: string): boolean;
 	once(event: "drain", listener: () => void): JsonlWriteStream;
+	once(event: "error", listener: (error: Error) => void): JsonlWriteStream;
+	on(event: "error", listener: (error: Error) => void): JsonlWriteStream;
 	end(callback?: () => void): void;
 }
 
 const DEFAULT_MAX_JSONL_BYTES = 50 * 1024 * 1024;
+const JSONL_CLOSE_TIMEOUT_MS = 1000;
 
 interface JsonlWriterDeps {
 	createWriteStream?: (filePath: string) => JsonlWriteStream;
 	maxBytes?: number;
+	onError?: (message: string) => void;
 }
 
 interface JsonlWriter {
 	writeLine(line: string): void;
 	close(): Promise<void>;
+	getError(): string | undefined;
 }
 
 export function createJsonlWriter(
@@ -32,24 +37,44 @@ export function createJsonlWriter(
 		return {
 			writeLine() {},
 			async close() {},
+			getError() { return undefined; },
 		};
 	}
+
+	let writeError: string | undefined;
+	const recordError = (error: unknown) => {
+		if (writeError) return;
+		const message = error instanceof Error ? error.message : String(error);
+		writeError = `Failed to write JSONL artifact '${filePath}': ${message}`;
+		deps.onError?.(writeError);
+	};
 
 	const createWriteStream = deps.createWriteStream ?? ((targetPath: string) => fs.createWriteStream(targetPath, { flags: "a" }));
-	let stream: JsonlWriteStream | undefined;
-	try {
-		stream = createWriteStream(filePath);
-	} catch {
-		return {
-			writeLine() {},
-			async close() {},
-		};
-	}
-
 	let backpressured = false;
 	let closed = false;
 	let bytesWritten = 0;
 	const maxBytes = deps.maxBytes ?? DEFAULT_MAX_JSONL_BYTES;
+	let stream: JsonlWriteStream | undefined;
+	let closePromise: Promise<void> | undefined;
+	try {
+		stream = createWriteStream(filePath);
+		stream.on("error", (error) => {
+			recordError(error);
+			if (backpressured) {
+				backpressured = false;
+				source.resume();
+			}
+			closed = true;
+			stream = undefined;
+		});
+	} catch (error) {
+		recordError(error);
+		return {
+			writeLine() {},
+			async close() {},
+			getError() { return writeError; },
+		};
+	}
 
 	return {
 		writeLine(line: string) {
@@ -68,14 +93,51 @@ export function createJsonlWriter(
 						if (!closed) source.resume();
 					});
 				}
-			} catch {}
+			} catch (error) {
+				recordError(error);
+				if (backpressured) {
+					backpressured = false;
+					source.resume();
+				}
+				closed = true;
+				stream = undefined;
+			}
 		},
-		async close() {
-			if (!stream || closed) return;
+		close() {
+			if (closePromise) return closePromise;
+			if (!stream || closed) return Promise.resolve();
 			closed = true;
 			const current = stream;
 			stream = undefined;
-			await new Promise<void>((resolve) => current.end(() => resolve()));
+			closePromise = new Promise<void>((resolve) => {
+				let done = false;
+				let timeout: NodeJS.Timeout | undefined;
+				const finish = () => {
+					if (done) return;
+					done = true;
+					if (timeout) clearTimeout(timeout);
+					resolve();
+				};
+				timeout = setTimeout(() => {
+					recordError(new Error(`close timed out after ${JSONL_CLOSE_TIMEOUT_MS}ms`));
+					finish();
+				}, JSONL_CLOSE_TIMEOUT_MS);
+				timeout.unref?.();
+				current.once("error", (error) => {
+					recordError(error);
+					finish();
+				});
+				try {
+					current.end(finish);
+				} catch (error) {
+					recordError(error);
+					finish();
+				}
+			});
+			return closePromise;
+		},
+		getError() {
+			return writeError;
 		},
 	};
 }

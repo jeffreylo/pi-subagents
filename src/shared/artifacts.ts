@@ -43,15 +43,49 @@ export function ensureArtifactsDir(dir: string): void {
 	fs.mkdirSync(dir, { recursive: true });
 }
 
+export interface ArtifactWriteFailure {
+	operation: string;
+	filePath: string;
+	message: string;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+export function formatArtifactWriteFailure(failure: ArtifactWriteFailure): string {
+	return `Failed to ${failure.operation} '${failure.filePath}': ${failure.message}`;
+}
+
 export function writeArtifact(filePath: string, content: string): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	fs.writeFileSync(filePath, content, "utf-8");
 }
 
+export function tryWriteArtifact(filePath: string, content: string, operation = "write artifact"): ArtifactWriteFailure | undefined {
+	try {
+		writeArtifact(filePath, content);
+		return undefined;
+	} catch (error) {
+		return { operation, filePath, message: errorMessage(error) };
+	}
+}
+
 export function writeMetadata(filePath: string, metadata: object): void {
-	fs.writeFileSync(filePath, JSON.stringify(metadata, null, 2), "utf-8");
+	writeArtifact(filePath, JSON.stringify(metadata, null, 2));
+}
+
+export function tryWriteMetadata(filePath: string, metadata: object, operation = "write artifact metadata"): ArtifactWriteFailure | undefined {
+	try {
+		writeMetadata(filePath, metadata);
+		return undefined;
+	} catch (error) {
+		return { operation, filePath, message: errorMessage(error) };
+	}
 }
 
 export function appendJsonl(filePath: string, line: string): void {
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	fs.appendFileSync(filePath, `${line}\n`);
 }
 

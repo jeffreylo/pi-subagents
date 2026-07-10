@@ -6,7 +6,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import { createChildTranscriptWriter, type ChildTranscriptWriter } from "../../shared/child-transcript.ts";
 import { consumeInterruptRequest, deliverInterruptRequest, deliverStopRequest, deliverTimeoutRequest, enqueueStepSteer, stepSteerInboxDir, watchAsyncControlInbox, type SteerRequest } from "./control-channel.ts";
-import { appendJsonl as appendRawJsonl, getArtifactPaths } from "../../shared/artifacts.ts";
+import { appendJsonl as appendRawJsonl, formatArtifactWriteFailure, getArtifactPaths, tryWriteArtifact, tryWriteMetadata, type ArtifactWriteFailure } from "../../shared/artifacts.ts";
 import { PI_CODING_AGENT_PACKAGE, getPiSpawnCommand, resolveInstalledPiPackageRoot } from "../shared/pi-spawn.ts";
 import { captureSingleOutputSnapshot, finalizeSingleOutput, formatSavedOutputReference, resolveSingleOutput, type SingleOutputSnapshot } from "../shared/single-output.ts";
 import {
@@ -163,6 +163,7 @@ interface StepResult {
 	modelAttempts?: ModelAttempt[];
 	totalCost?: CostSummary;
 	artifactPaths?: ArtifactPaths;
+	artifactError?: string;
 	truncated?: boolean;
 	transcriptPath?: string;
 	transcriptError?: string;
@@ -242,6 +243,18 @@ function appendDiagnosticJsonl(filePath: string, line: string, droppedEventType?
 		appendJsonl(filePath, marker);
 	}
 	state.diagnosticsTruncated = true;
+}
+
+function appendArtifactFailureDiagnostic(eventsPath: string, failure: ArtifactWriteFailure): string {
+	const message = formatArtifactWriteFailure(failure);
+	appendDiagnosticJsonl(eventsPath, JSON.stringify({
+		type: "subagent.artifact.write_failed",
+		ts: Date.now(),
+		operation: failure.operation,
+		path: failure.filePath,
+		message,
+	}), "subagent.artifact.write_failed");
+	return message;
 }
 
 function shouldPersistChildEvent(event: Record<string, unknown>): boolean {
@@ -893,6 +906,7 @@ async function runSingleStep(
 	attemptedModels?: string[];
 	modelAttempts?: ModelAttempt[];
 	artifactPaths?: ArtifactPaths;
+	artifactError?: string;
 	transcriptPath?: string;
 	transcriptError?: string;
 	interrupted?: boolean;
@@ -992,15 +1006,17 @@ async function runSingleStep(
 	}
 	const sessionEnabled = Boolean(step.sessionFile) || ctx.sessionEnabled;
 	const sessionDir = step.sessionFile ? undefined : ctx.sessionDir;
+	const eventsPath = path.join(path.dirname(ctx.outputFile), "events.jsonl");
+	const artifactErrors: string[] = [];
 
 	let artifactPaths: ArtifactPaths | undefined;
 	let transcriptWriter: ChildTranscriptWriter | undefined;
 	if (ctx.artifactsDir && ctx.artifactConfig?.enabled !== false) {
 		const index = ctx.flatStepCount > 1 ? ctx.flatIndex : undefined;
 		artifactPaths = getArtifactPaths(ctx.artifactsDir, ctx.id, step.agent, index);
-		fs.mkdirSync(ctx.artifactsDir, { recursive: true });
 		if (ctx.artifactConfig?.includeInput !== false) {
-			fs.writeFileSync(artifactPaths.inputPath, `# Task for ${step.agent}\n\n${task}`, "utf-8");
+			const failure = tryWriteArtifact(artifactPaths.inputPath, `# Task for ${step.agent}\n\n${task}`, "write artifact input");
+			if (failure) artifactErrors.push(appendArtifactFailureDiagnostic(eventsPath, failure));
 		}
 		if (ctx.artifactConfig?.includeTranscript !== false) {
 			transcriptWriter = createChildTranscriptWriter({
@@ -1023,7 +1039,6 @@ async function runSingleStep(
 	const attemptedModels: string[] = [];
 	const modelAttempts: ModelAttempt[] = [];
 	const attemptNotes: string[] = [];
-	const eventsPath = path.join(path.dirname(ctx.outputFile), "events.jsonl");
 	let finalResult: RunPiStreamingResult | undefined;
 	let finalOutputSnapshot: SingleOutputSnapshot | undefined;
 	let completionGuardTriggeredFinal = false;
@@ -1252,28 +1267,29 @@ async function runSingleStep(
 
 	if (artifactPaths && ctx.artifactConfig?.enabled !== false) {
 		if (ctx.artifactConfig?.includeOutput !== false) {
-			fs.writeFileSync(artifactPaths.outputPath, output, "utf-8");
+			const failure = tryWriteArtifact(artifactPaths.outputPath, output, "write artifact output");
+			if (failure) artifactErrors.push(appendArtifactFailureDiagnostic(eventsPath, failure));
 		}
 		if (ctx.artifactConfig?.includeMetadata !== false) {
-			fs.writeFileSync(
-				artifactPaths.metadataPath,
-				JSON.stringify({
-					runId: ctx.id,
-					agent: step.agent,
-					task,
-					exitCode: effectiveFinalExitCode,
-					model: finalResult?.model,
-					attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
-					modelAttempts,
-					...(transcriptWriter ? { transcriptPath: artifactPaths.transcriptPath } : {}),
-					transcriptError: transcriptWriter?.getError(),
-					skills: step.skills,
-					timestamp: Date.now(),
-				}, null, 2),
-				"utf-8",
-			);
+			const failure = tryWriteMetadata(artifactPaths.metadataPath, {
+				runId: ctx.id,
+				agent: step.agent,
+				task,
+				exitCode: effectiveFinalExitCode,
+				model: finalResult?.model,
+				attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
+				modelAttempts,
+				...(transcriptWriter ? { transcriptPath: artifactPaths.transcriptPath } : {}),
+				transcriptError: transcriptWriter?.getError(),
+				artifactError: artifactErrors.length > 0 ? artifactErrors.join("\n") : undefined,
+				skills: step.skills,
+				timestamp: Date.now(),
+			}, "write artifact metadata");
+			if (failure) artifactErrors.push(appendArtifactFailureDiagnostic(eventsPath, failure));
 		}
 	}
+
+	const artifactError = artifactErrors.length > 0 ? artifactErrors.join("\n") : undefined;
 
 	return {
 		agent: step.agent,
@@ -1287,6 +1303,7 @@ async function runSingleStep(
 		modelAttempts,
 		totalCost: costSummaryFromAttempts(modelAttempts),
 		artifactPaths,
+		artifactError,
 		transcriptPath: transcriptWriter ? artifactPaths?.transcriptPath : undefined,
 		transcriptError: transcriptWriter?.getError(),
 		interrupted: timedOutAfterAcceptance || stoppedAfterAcceptance || turnBudgetExceeded ? false : finalResult?.interrupted,
@@ -2620,6 +2637,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				statusPayload.steps[fi].error = stopped || childStopped ? stopMessage : timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.error;
 				statusPayload.steps[fi].transcriptPath = singleResult.transcriptPath ?? statusPayload.steps[fi].transcriptPath;
 				statusPayload.steps[fi].transcriptError = singleResult.transcriptError;
+				statusPayload.steps[fi].artifactError = singleResult.artifactError;
 				statusPayload.steps[fi].structuredOutput = singleResult.structuredOutput;
 				statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
 				statusPayload.steps[fi].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
@@ -2660,6 +2678,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					modelAttempts: pr.modelAttempts,
 					totalCost: pr.totalCost,
 					artifactPaths: pr.artifactPaths,
+					artifactError: pr.artifactError,
 					transcriptPath: pr.transcriptPath,
 					transcriptError: pr.transcriptError,
 					structuredOutput: pr.structuredOutput,
@@ -2925,6 +2944,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.steps[fi].error = stopped || childStopped ? stopMessage : timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.error;
 						statusPayload.steps[fi].transcriptPath = singleResult.transcriptPath ?? statusPayload.steps[fi].transcriptPath;
 						statusPayload.steps[fi].transcriptError = singleResult.transcriptError;
+						statusPayload.steps[fi].artifactError = singleResult.artifactError;
 						statusPayload.steps[fi].structuredOutput = singleResult.structuredOutput;
 						statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
 						statusPayload.steps[fi].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
@@ -3001,6 +3021,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						modelAttempts: pr.modelAttempts,
 						totalCost: pr.totalCost,
 						artifactPaths: pr.artifactPaths,
+						artifactError: pr.artifactError,
 						transcriptPath: pr.transcriptPath,
 						transcriptError: pr.transcriptError,
 						structuredOutput: pr.structuredOutput,
@@ -3116,6 +3137,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				modelAttempts: singleResult.modelAttempts,
 				totalCost: singleResult.totalCost,
 				artifactPaths: singleResult.artifactPaths,
+				artifactError: singleResult.artifactError,
 				transcriptPath: singleResult.transcriptPath,
 				transcriptError: singleResult.transcriptError,
 				structuredOutput: singleResult.structuredOutput,
@@ -3188,6 +3210,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.steps[flatIndex].error = stopped || childStopped ? stopMessage : timedOut ? (timeoutMessage ?? "Subagent timed out.") : singleResult.error;
 			statusPayload.steps[flatIndex].transcriptPath = singleResult.transcriptPath ?? statusPayload.steps[flatIndex].transcriptPath;
 			statusPayload.steps[flatIndex].transcriptError = singleResult.transcriptError;
+			statusPayload.steps[flatIndex].artifactError = singleResult.artifactError;
 			statusPayload.steps[flatIndex].structuredOutput = singleResult.structuredOutput;
 			statusPayload.steps[flatIndex].structuredOutputPath = singleResult.structuredOutputPath;
 			statusPayload.steps[flatIndex].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
@@ -3396,6 +3419,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				modelAttempts: r.modelAttempts,
 				totalCost: r.totalCost,
 				artifactPaths: r.artifactPaths,
+				artifactError: r.artifactError,
 				truncated: r.truncated,
 				transcriptPath: r.transcriptPath,
 				transcriptError: r.transcriptError,

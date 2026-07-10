@@ -41,7 +41,7 @@ interface AsyncResultPayload {
 	wrapUpRequested?: boolean;
 	totalTokens?: { input: number; output: number; total: number };
 	totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
-	results: Array<{ output?: string; success?: boolean; error?: string; timedOut?: boolean; turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; exceededAtTurn?: number }; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown } }>;
+	results: Array<{ output?: string; success?: boolean; error?: string; timedOut?: boolean; turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; exceededAtTurn?: number }; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; artifactPaths?: { inputPath?: string; outputPath?: string; metadataPath?: string }; artifactError?: string; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown } }>;
 	outputs?: Record<string, { text?: string; structured?: unknown }>;
 	workflowGraph?: { nodes?: Array<{ kind?: string; label?: string; phase?: string; status?: string; error?: string; outputName?: string; structured?: boolean; children?: Array<{ label?: string; outputName?: string; itemKey?: string; status?: string; error?: string }> }> };
 }
@@ -380,6 +380,50 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		} finally {
 			process.execPath = originalExecPath;
 		}
+	});
+
+	it("keeps async run successful when project artifacts are deleted before final writes", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ delay: 500, output: "artifact deletion async done" });
+		const id = `async-artifact-delete-${Date.now().toString(36)}`;
+		const artifactsDir = path.join(tempDir, ".pi-subagents", "artifacts");
+		const result = executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Say artifact deletion async done. Do not edit files.",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-1" },
+			artifactsDir,
+			artifactConfig: {
+				enabled: true,
+				includeInput: true,
+				includeOutput: true,
+				includeJsonl: false,
+				includeMetadata: true,
+				includeTranscript: false,
+				cleanupDays: 7,
+			},
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions"),
+			maxSubagentDepth: 2,
+		});
+
+		assert.equal(result.isError, undefined);
+		const inputPath = path.join(artifactsDir, `${id}_worker_input.md`);
+		const inputDeadline = Date.now() + 5_000;
+		while (!fs.existsSync(inputPath)) {
+			if (Date.now() > inputDeadline) assert.fail(`Timed out waiting for input artifact: ${inputPath}`);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		fs.rmSync(artifactsDir, { recursive: true, force: true });
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		assert.equal(payload.success, true);
+		assert.equal(payload.state, "complete");
+		assert.equal(payload.results[0]?.success, true);
+		assert.equal(payload.results[0]?.output, "artifact deletion async done");
+		assert.equal(payload.results[0]?.artifactError, undefined);
+		assert.ok(payload.results[0]?.artifactPaths?.outputPath);
+		assert.equal(fs.readFileSync(payload.results[0].artifactPaths.outputPath, "utf-8"), "artifact deletion async done");
 	});
 
 	it("falls back to PATH node when node-like process.execPath is stale", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {

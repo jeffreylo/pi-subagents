@@ -78,6 +78,7 @@ interface RunSyncResult {
 	progress: ProgressSummary;
 	controlEvents?: Array<{ type?: string; message: string; reason?: string; turns?: number; tokens?: number; currentPath?: string; recentFailureSummary?: string }>;
 	artifactPaths?: ArtifactPaths;
+	artifactError?: string;
 	transcriptPath?: string;
 	transcriptError?: string;
 	finalOutput?: string;
@@ -1163,6 +1164,62 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.match(transcript.at(-1)?.text ?? "", /^Result text/);
 		assert.equal(result.transcriptError, undefined);
 		assert.ok(fs.existsSync(artifactsDir), "artifacts dir should exist");
+	});
+
+	it("keeps foreground success when JSONL artifact streaming cannot open", async () => {
+		mockPi.onCall({ output: "Result text" });
+		const agents = makeAgentConfigs(["echo"]);
+		const artifactsDir = path.join(tempDir, "blocked-artifacts");
+		fs.writeFileSync(artifactsDir, "not a directory", "utf-8");
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "blocked-jsonl-artifact",
+			artifactsDir,
+			artifactConfig: { enabled: true, includeInput: true, includeOutput: true, includeJsonl: true, includeMetadata: true, includeTranscript: false },
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.error, undefined);
+		assert.equal(result.finalOutput, "Result text");
+		assert.ok(result.artifactPaths, "should still expose intended artifact paths");
+		assert.match(result.artifactError ?? "", /Failed to write JSONL artifact/);
+		assert.match(result.artifactError ?? "", /blocked-jsonl-artifact_echo\.jsonl/);
+	});
+
+	it("keeps foreground success and returns JSONL close diagnostics", async () => {
+		mockPi.onCall({ output: "Result text" });
+		const agents = makeAgentConfigs(["echo"]);
+		const artifactsDir = path.join(tempDir, "close-error-artifacts");
+		const errorHandlers: Array<(error: Error) => void> = [];
+		const stream = {
+			write() { return true; },
+			on(event: "error", listener: (error: Error) => void) {
+				if (event === "error") errorHandlers.push(listener);
+				return stream;
+			},
+			once(event: "drain" | "error", listener: (() => void) | ((error: Error) => void)) {
+				if (event === "error") errorHandlers.push(listener as (error: Error) => void);
+				return stream;
+			},
+			end() {
+				setTimeout(() => {
+					for (const handler of [...errorHandlers]) handler(new Error("delayed close failure"));
+				}, 10);
+			},
+		};
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "jsonl-close-error",
+			artifactsDir,
+			artifactConfig: { enabled: true, includeInput: true, includeOutput: true, includeJsonl: true, includeMetadata: true, includeTranscript: false },
+			jsonlWriterDeps: { createWriteStream: () => stream },
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.error, undefined);
+		assert.equal(result.finalOutput, "Result text");
+		assert.match(result.artifactError ?? "", /Failed to write JSONL artifact/);
+		assert.match(result.artifactError ?? "", /delayed close failure/);
 	});
 
 	it("does not surface transcript paths when transcript artifacts are disabled", async () => {

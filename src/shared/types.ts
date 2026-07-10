@@ -498,6 +498,7 @@ export interface SingleResult {
 	progressSummary?: ProgressSummary;
 	toolCalls?: ToolCallSummary[];
 	artifactPaths?: ArtifactPaths;
+	artifactError?: string;
 	truncation?: TruncationResult;
 	finalOutput?: string;
 	outputMode?: OutputMode;
@@ -739,6 +740,7 @@ export interface AsyncStatus {
 		sessionFile?: string;
 		transcriptPath?: string;
 		transcriptError?: string;
+		artifactError?: string;
 		activityState?: ActivityState;
 		lastActivityAt?: number;
 		currentTool?: string;

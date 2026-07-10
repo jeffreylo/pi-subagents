@@ -10,8 +10,9 @@ import { resolveForkThinkingOverride } from "../../shared/fork-context.ts";
 import {
 	ensureArtifactsDir,
 	getArtifactPaths,
-	writeArtifact,
-	writeMetadata,
+	formatArtifactWriteFailure,
+	tryWriteArtifact,
+	tryWriteMetadata,
 } from "../../shared/artifacts.ts";
 import { createChildTranscriptWriter, type ChildTranscriptWriter } from "../../shared/child-transcript.ts";
 import {
@@ -254,6 +255,10 @@ async function runSingleAttempt(
 		...(options.turnBudget ? { turnBudget: initialTurnBudgetState(options.turnBudget) } : {}),
 		...(options.toolBudget ? { toolBudget: initialToolBudgetState(options.toolBudget) } : {}),
 	};
+	const appendResultArtifactError = (message: string | undefined) => {
+		if (!message || result.artifactError?.split("\n").includes(message)) return;
+		result.artifactError = result.artifactError ? `${result.artifactError}\n${message}` : message;
+	};
 	const startTime = Date.now();
 	if (options.structuredOutput) {
 		try {
@@ -315,7 +320,8 @@ async function runSingleAttempt(
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});
-		const jsonlWriter = createJsonlWriter(shared.jsonlPath, proc.stdout);
+		const jsonlWriterDeps = (options as RunSyncOptions & { jsonlWriterDeps?: Parameters<typeof createJsonlWriter>[2] }).jsonlWriterDeps ?? {};
+		const jsonlWriter = createJsonlWriter(shared.jsonlPath, proc.stdout, { ...jsonlWriterDeps, onError: appendResultArtifactError });
 		let buf = "";
 		let processClosed = false;
 		let settled = false;
@@ -826,80 +832,86 @@ async function runSingleAttempt(
 			clearFinalDrainTimers();
 		});
 		proc.on("close", (code, signal) => {
-			clearFinalDrainTimers();
-			clearStdioGuard();
-			void jsonlWriter.close().catch(() => {
-				// JSONL artifact flush is best effort.
+			let finalCode = detached ? -2 : 1;
+			void (async () => {
+				clearFinalDrainTimers();
+				clearStdioGuard();
+				if (buf.trim()) processLine(buf);
+				if (stderrBuf.trim()) shared.transcriptWriter?.writeStderrText(stderrBuf);
+				let closeError = result.error ?? assistantError;
+				const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !closeError;
+				if (code !== 0 && stderrBuf.trim() && !closeError && !forcedDrainAfterFinalSuccess) {
+					closeError = stderrBuf.trim();
+				}
+				finalCode = forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (code ?? 1) : (code ?? 0);
+				await jsonlWriter.close();
+				appendResultArtifactError(jsonlWriter.getError());
+				cleanupTempDir(tempDir);
+				if (detached) {
+					const recoveredProgress = snapshotProgress(progress);
+					const recoveredResult = snapshotResult(result, recoveredProgress);
+					if (!recoveredResult.error && closeError) recoveredResult.error = closeError;
+					recoveredResult.exitCode = recoveredResult.error && finalCode === 0 ? 1 : finalCode;
+					recoveredProgress.status = recoveredResult.exitCode === 0 ? "completed" : "failed";
+					recoveredProgress.durationMs = Date.now() - startTime;
+					if (recoveredResult.error) recoveredProgress.error = recoveredResult.error;
+					recoveredResult.progressSummary = {
+						toolCount: recoveredProgress.toolCount,
+						tokens: recoveredProgress.tokens,
+						durationMs: recoveredProgress.durationMs,
+					};
+					let fullOutput = stripAcceptanceReport(getFinalOutput(recoveredResult.messages ?? []));
+					fullOutput = fullOutput.trim() || recoveredResult.error || recoveredResult.finalOutput || "Detached child exited without final output.";
+					recoveredResult.outputMode = options.outputMode ?? "inline";
+					if (options.outputPath && recoveredResult.exitCode === 0) {
+						const resolvedOutput = resolveSingleOutput(options.outputPath, fullOutput, shared.outputSnapshot);
+						fullOutput = stripAcceptanceReport(resolvedOutput.fullOutput);
+						recoveredResult.savedOutputPath = resolvedOutput.savedPath;
+						recoveredResult.outputSaveError = resolvedOutput.saveError;
+						if (resolvedOutput.savedPath) {
+							recoveredResult.outputReference = formatSavedOutputReference(resolvedOutput.savedPath, fullOutput);
+						} else {
+							recoveredResult.exitCode = 1;
+							recoveredResult.error = `Output file was not finalized after detached child exit: ${resolvedOutput.saveError ?? options.outputPath}`;
+							recoveredProgress.status = "failed";
+							recoveredProgress.error = recoveredResult.error;
+						}
+					}
+					recoveredResult.finalOutput = options.outputMode === "file-only" && recoveredResult.savedOutputPath && recoveredResult.outputReference
+						? recoveredResult.outputReference.message
+						: fullOutput;
+					if (recoveredResult.artifactPaths && options.artifactConfig?.enabled !== false && options.artifactConfig?.includeOutput !== false) {
+						const failure = tryWriteArtifact(recoveredResult.artifactPaths.outputPath, fullOutput, "write detached artifact output");
+						if (failure) {
+							const message = formatArtifactWriteFailure(failure);
+							recoveredResult.artifactError = recoveredResult.artifactError ? `${recoveredResult.artifactError}\n${message}` : message;
+						}
+					}
+					options.onDetachedExit?.(recoveredResult);
+					finish(-2);
+					return;
+				}
+				if (!result.error && closeError) result.error = closeError;
+				processClosed = true;
+				finish(finalCode);
+			})().catch((error) => {
+				appendResultArtifactError(error instanceof Error ? `Failed to close JSONL artifact: ${error.message}` : `Failed to close JSONL artifact: ${String(error)}`);
+				finish(finalCode);
 			});
-			cleanupTempDir(tempDir);
-			if (buf.trim()) processLine(buf);
-			if (stderrBuf.trim()) shared.transcriptWriter?.writeStderrText(stderrBuf);
-			let closeError = result.error ?? assistantError;
-			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !closeError;
-			if (code !== 0 && stderrBuf.trim() && !closeError && !forcedDrainAfterFinalSuccess) {
-				closeError = stderrBuf.trim();
-			}
-			const finalCode = forcedDrainAfterFinalSuccess ? 0 : forcedTerminationSignal || signal ? (code ?? 1) : (code ?? 0);
-			if (detached) {
-				const recoveredProgress = snapshotProgress(progress);
-				const recoveredResult = snapshotResult(result, recoveredProgress);
-				if (!recoveredResult.error && closeError) recoveredResult.error = closeError;
-				recoveredResult.exitCode = recoveredResult.error && finalCode === 0 ? 1 : finalCode;
-				recoveredProgress.status = recoveredResult.exitCode === 0 ? "completed" : "failed";
-				recoveredProgress.durationMs = Date.now() - startTime;
-				if (recoveredResult.error) recoveredProgress.error = recoveredResult.error;
-				recoveredResult.progressSummary = {
-					toolCount: recoveredProgress.toolCount,
-					tokens: recoveredProgress.tokens,
-					durationMs: recoveredProgress.durationMs,
-				};
-				let fullOutput = stripAcceptanceReport(getFinalOutput(recoveredResult.messages ?? []));
-				fullOutput = fullOutput.trim() || recoveredResult.error || recoveredResult.finalOutput || "Detached child exited without final output.";
-				recoveredResult.outputMode = options.outputMode ?? "inline";
-				if (options.outputPath && recoveredResult.exitCode === 0) {
-					const resolvedOutput = resolveSingleOutput(options.outputPath, fullOutput, shared.outputSnapshot);
-					fullOutput = stripAcceptanceReport(resolvedOutput.fullOutput);
-					recoveredResult.savedOutputPath = resolvedOutput.savedPath;
-					recoveredResult.outputSaveError = resolvedOutput.saveError;
-					if (resolvedOutput.savedPath) {
-						recoveredResult.outputReference = formatSavedOutputReference(resolvedOutput.savedPath, fullOutput);
-					} else {
-						recoveredResult.exitCode = 1;
-						recoveredResult.error = `Output file was not finalized after detached child exit: ${resolvedOutput.saveError ?? options.outputPath}`;
-						recoveredProgress.status = "failed";
-						recoveredProgress.error = recoveredResult.error;
-					}
-				}
-				recoveredResult.finalOutput = options.outputMode === "file-only" && recoveredResult.savedOutputPath && recoveredResult.outputReference
-					? recoveredResult.outputReference.message
-					: fullOutput;
-				if (recoveredResult.artifactPaths && options.artifactConfig?.enabled !== false && options.artifactConfig?.includeOutput !== false) {
-					try {
-						writeArtifact(recoveredResult.artifactPaths.outputPath, fullOutput);
-					} catch {
-						// Detached children may outlive test/temp cleanup; recovered status is best-effort.
-					}
-				}
-				options.onDetachedExit?.(recoveredResult);
-				finish(-2);
-				return;
-			}
-			if (!result.error && closeError) result.error = closeError;
-			processClosed = true;
-			finish(finalCode);
 		});
 		proc.on("error", (error) => {
-			clearFinalDrainTimers();
-			clearStdioGuard();
-			void jsonlWriter.close().catch(() => {
-				// JSONL artifact flush is best effort.
-			});
-			cleanupTempDir(tempDir);
-			if (stderrBuf.trim()) shared.transcriptWriter?.writeStderrText(stderrBuf);
-			if (!result.error) {
-				result.error = error instanceof Error ? error.message : String(error);
-			}
-			finish(1);
+			void (async () => {
+				clearFinalDrainTimers();
+				clearStdioGuard();
+				if (stderrBuf.trim()) shared.transcriptWriter?.writeStderrText(stderrBuf);
+				if (!result.error) {
+					result.error = error instanceof Error ? error.message : String(error);
+				}
+				await jsonlWriter.close();
+				appendResultArtifactError(jsonlWriter.getError());
+				cleanupTempDir(tempDir);
+				finish(1);
+			})().catch(() => finish(1));
 		});
 
 		if (options.signal) {
@@ -1178,11 +1190,17 @@ export async function runSync(
 	let artifactPathsResult: ArtifactPaths | undefined;
 	let jsonlPath: string | undefined;
 	let transcriptWriter: ChildTranscriptWriter | undefined;
+	const artifactErrors: string[] = [];
 	if (options.artifactsDir && options.artifactConfig?.enabled !== false) {
 		artifactPathsResult = getArtifactPaths(options.artifactsDir, options.runId, agentName, options.index);
-		ensureArtifactsDir(options.artifactsDir);
+		try {
+			ensureArtifactsDir(options.artifactsDir);
+		} catch (error) {
+			artifactErrors.push(`Failed to create artifact directory '${options.artifactsDir}': ${error instanceof Error ? error.message : String(error)}`);
+		}
 		if (options.artifactConfig?.includeInput !== false) {
-				writeArtifact(artifactPathsResult.inputPath, `# Task for ${agentName}\n\n${taskWithAcceptance}`);
+			const failure = tryWriteArtifact(artifactPathsResult.inputPath, `# Task for ${agentName}\n\n${taskWithAcceptance}`, "write artifact input");
+			if (failure) artifactErrors.push(formatArtifactWriteFailure(failure));
 		}
 		if (options.artifactConfig?.includeJsonl !== false) {
 			jsonlPath = artifactPathsResult.jsonlPath;
@@ -1274,10 +1292,12 @@ export async function runSync(
 	if (artifactPathsResult && options.artifactConfig?.enabled !== false) {
 		result.artifactPaths = artifactPathsResult;
 		if (options.artifactConfig?.includeOutput !== false) {
-			writeArtifact(artifactPathsResult.outputPath, artifactOutputByResult.get(result) ?? result.finalOutput ?? "");
+			const failure = tryWriteArtifact(artifactPathsResult.outputPath, artifactOutputByResult.get(result) ?? result.finalOutput ?? "", "write artifact output");
+			if (failure) artifactErrors.push(formatArtifactWriteFailure(failure));
 		}
 		if (options.artifactConfig?.includeMetadata !== false) {
-			writeMetadata(artifactPathsResult.metadataPath, {
+			const artifactErrorForMetadata = [result.artifactError, ...artifactErrors].filter((message): message is string => Boolean(message)).join("\n") || undefined;
+			const failure = tryWriteMetadata(artifactPathsResult.metadataPath, {
 				runId: options.runId,
 				agent: agentName,
 				task,
@@ -1293,9 +1313,12 @@ export async function runSync(
 				transcriptError: result.transcriptError,
 				skills: result.skills,
 				skillsWarning: result.skillsWarning,
+				artifactError: artifactErrorForMetadata,
 				timestamp: Date.now(),
-			});
+			}, "write artifact metadata");
+			if (failure) artifactErrors.push(formatArtifactWriteFailure(failure));
 		}
+		if (artifactErrors.length > 0) result.artifactError = [result.artifactError, ...artifactErrors].filter((message): message is string => Boolean(message)).join("\n");
 
 		if (options.maxOutput) {
 			const config = { ...DEFAULT_MAX_OUTPUT, ...options.maxOutput };
