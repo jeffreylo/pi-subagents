@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { row } from "../../src/tui/render-helpers.ts";
 import { renderSubagentResult } from "../../src/tui/render.ts";
+import type { AcceptanceLedger, SingleResult } from "../../src/shared/types.ts";
 
 const theme = {
 	fg(_name: string, text: string): string {
@@ -21,7 +22,7 @@ function componentText(component: unknown): string {
 	return "";
 }
 
-function result(agent: string, output: string) {
+function result(agent: string, output: string): SingleResult {
 	return {
 		agent,
 		task: `${agent} task`,
@@ -29,6 +30,35 @@ function result(agent: string, output: string) {
 		messages: [],
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
 		finalOutput: output,
+	};
+}
+
+function rejectedAcceptance(): AcceptanceLedger {
+	return {
+		status: "rejected",
+		explicit: true,
+		effectiveAcceptance: {
+			level: "checked",
+			explicit: true,
+			inferredReason: [],
+			criteria: [],
+			evidence: [],
+			verify: [],
+			stopRules: [],
+		},
+		inferredReason: [],
+		criteria: [],
+		runtimeChecks: [],
+		verifyRuns: [],
+	};
+}
+
+function failedResult(acceptance?: AcceptanceLedger): SingleResult {
+	return {
+		...result("worker", "execution failed"),
+		exitCode: 1,
+		error: "execution failed",
+		acceptance,
 	};
 }
 
@@ -47,6 +77,21 @@ test("row keeps styled multiline content within the available width", () => {
 	const rendered = row("\u001b[31merror line 1\nline 2\tvalue\u001b[39m", 18, theme as any);
 	assert.equal(visibleWidth(rendered), 18);
 	assert.doesNotMatch(rendered, /[\r\n\t]/);
+});
+
+test("expanded single-result rendering distinguishes acceptance rejection from execution failure", () => {
+	const renderFailure = (singleResult: SingleResult): string => componentText(renderSubagentResult({
+		content: [{ type: "text", text: "failed" }],
+		details: { mode: "single", results: [singleResult] },
+	}, { expanded: true }, theme as any));
+
+	const rejected = renderFailure(failedResult(rejectedAcceptance()));
+	assert.match(rejected, /acceptance rejected worker/);
+	assert.doesNotMatch(rejected, /failed worker/);
+
+	const executionFailure = renderFailure(failedResult());
+	assert.match(executionFailure, /failed worker/);
+	assert.doesNotMatch(executionFailure, /acceptance rejected/);
 });
 
 test("compact chain rendering uses workflow graph spans for dynamic fanout results", () => {

@@ -54,6 +54,24 @@ describe("result intercom formatter", () => {
 		assert.match(payload.message, /Session: \/tmp\/a-session\.jsonl/);
 	});
 
+	it("labels rejected acceptance separately from ordinary execution failure", () => {
+		const payload = buildSubagentResultIntercomPayload({
+			to: "chat",
+			runId: "run-rejected",
+			mode: "parallel",
+			source: "foreground",
+			children: [
+				{ agent: "acceptance-check", status: "failed", summary: "evidence missing", acceptance: { status: "rejected" } },
+				{ agent: "execution-check", status: "failed", summary: "process exited" },
+			],
+		});
+
+		assert.equal(payload.status, "failed");
+		assert.equal(payload.summary, "2 failed");
+		assert.match(payload.message, /1\. acceptance-check — acceptance rejected/);
+		assert.match(payload.message, /2\. execution-check — failed/);
+	});
+
 	it("advertises async revive only for single-child results with an existing session", () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-intercom-"));
 		try {

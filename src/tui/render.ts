@@ -266,6 +266,10 @@ function firstOutputLine(text: string): string {
 	return text.split("\n").find((line) => line.trim())?.trim() ?? "";
 }
 
+function failedResultLabel(result: Details["results"][number] | undefined): string {
+	return result.acceptance?.status === "rejected" ? "acceptance rejected" : "failed";
+}
+
 function resultStatusLine(result: Details["results"][number], output: string): string {
 	if (result.detached) return result.detachedReason ? `Detached: ${result.detachedReason}` : "Detached";
 	if (result.stopped) return "Stopped";
@@ -1452,7 +1456,7 @@ export function renderSubagentResult(
 				? theme.fg("warning", "detached")
 				: r.exitCode === 0
 					? theme.fg("success", "ok")
-					: theme.fg("error", "failed");
+					: theme.fg("error", failedResultLabel(r));
 		const contextBadge = d.context === "fork" ? theme.fg("warning", " [fork]") : "";
 		const output = r.truncation?.text || getSingleResultOutput(r);
 
@@ -1608,7 +1612,7 @@ export function renderSubagentResult(
 						&& hasEmptyTextOutputWithoutOutputTarget(result.task, getSingleResultOutput(result));
 					const isCurrent = i === (d.currentStepIndex ?? d.results.length);
 					const stepIcon = isFailed
-						? theme.fg("error", "failed")
+						? theme.fg("error", failedResultLabel(result))
 						: isEmptyWithoutTarget
 							? theme.fg("warning", "warning")
 							: isComplete
@@ -1680,7 +1684,7 @@ export function renderSubagentResult(
 		const statusIcon = rRunning
 			? theme.fg("warning", "running")
 			: r.exitCode !== 0
-				? theme.fg("error", "failed")
+				? theme.fg("error", failedResultLabel(r))
 				: hasEmptyTextOutputWithoutOutputTarget(r.task, resultOutput)
 					? theme.fg("warning", "warning")
 					: theme.fg("success", "done");

@@ -198,6 +198,12 @@ function asyncResumeGuidance(input: {
 	return "Resume: unavailable; no child session file was persisted.";
 }
 
+function resultStatusLabel(child: SubagentResultIntercomChild): string {
+	return child.status === "failed" && child.acceptance?.status === "rejected"
+		? "acceptance rejected"
+		: child.status;
+}
+
 function formatSubagentResultIntercomMessage(input: {
 	runId: string;
 	mode: SubagentRunMode;
@@ -234,7 +240,7 @@ function formatSubagentResultIntercomMessage(input: {
 	for (let index = 0; index < input.children.length; index++) {
 		const child = input.children[index]!;
 		lines.push("");
-		lines.push(`${index + 1}. ${child.agent} — ${child.status}`);
+		lines.push(`${index + 1}. ${child.agent} — ${resultStatusLabel(child)}`);
 		if (child.intercomTarget) lines.push(`${input.source === "async" ? "Previous intercom target" : "Run intercom target"}: ${child.intercomTarget}`);
 		if (child.artifactPath) lines.push(`Output artifact: ${child.artifactPath}`);
 		if (child.sessionPath) lines.push(`Session: ${child.sessionPath}`);

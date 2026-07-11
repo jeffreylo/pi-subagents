@@ -240,6 +240,7 @@ export interface SubagentResultIntercomChild {
 	agent: string;
 	status: SubagentResultStatus;
 	summary: string;
+	acceptance?: Pick<AcceptanceLedger, "status">;
 	index?: number;
 	artifactPath?: string;
 	sessionPath?: string;

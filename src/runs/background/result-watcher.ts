@@ -42,6 +42,7 @@ type ResultFileChild = {
 	success?: boolean;
 	state?: string;
 	stopped?: boolean;
+	acceptance?: SubagentResultIntercomChild["acceptance"];
 	sessionFile?: string;
 	artifactPaths?: { outputPath?: string };
 	intercomTarget?: string;
@@ -171,6 +172,7 @@ export function createResultWatcher(
 						state: childState,
 					}),
 					summary,
+					...(result.acceptance ? { acceptance: { status: result.acceptance.status } } : {}),
 					index,
 					artifactPath: result.artifactPaths?.outputPath,
 					...(typeof sessionPath === "string" && fsApi.existsSync(sessionPath) ? { sessionPath } : {}),

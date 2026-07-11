@@ -1305,6 +1305,7 @@ async function emitForegroundResultIntercom(input: {
 			detached: result.detached,
 		}),
 		summary: resultSummaryForIntercom(result),
+		...(result.acceptance ? { acceptance: { status: result.acceptance.status } } : {}),
 		index,
 		artifactPath: result.artifactPaths?.outputPath,
 		sessionPath: result.sessionFile,
