@@ -106,7 +106,8 @@ type TaskMutationIntent = { kind: "implementation" } | { kind: "read-only" } | {
 type ToolMutationCapability = { kind: "mutation-capable" } | { kind: "read-only" };
 
 function stripFrameworkInstructions(task: string): string {
-	return task
+	const withoutAcceptanceContract = task.replace(/\n## Acceptance Contract\s*[\s\S]*$/i, "");
+	return withoutAcceptanceContract
 		.split("\n")
 		.filter((line) => !/^\s*\[(?:Write to|Read from):/i.test(line))
 		.filter((line) => !/^\s*(?:Create and maintain progress at:|Update progress at:|\*\*Output:\*\*|Write your findings to(?: exactly this path)?:|This path is authoritative for this run\.|Ignore any other output filename or output path mentioned elsewhere)/i.test(line))

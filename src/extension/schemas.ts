@@ -74,6 +74,14 @@ const AcceptanceOverride = Type.Unsafe({
 	description: "Optional acceptance policy. Omitted means auto-inferred; verified requires configured runtime commands.",
 });
 
+const ContinuationOverride = Type.Unsafe({
+	anyOf: [
+		{ type: "boolean", enum: [false] },
+		{ type: "object", additionalProperties: false, properties: { maxAttempts: { type: "integer", minimum: 1, maximum: 3 } } },
+	],
+	description: "Bounded automatic continuation policy. maxAttempts counts primary-agent executions, defaults to 2, and is capped at 3.",
+});
+
 const TurnBudgetOverride = Type.Object({
 	maxTurns: Type.Integer({ minimum: 1 }),
 	graceTurns: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -105,6 +113,7 @@ const TaskItem = Type.Object({
 	skill: Type.Optional(SkillOverride),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
+	continuation: Type.Optional(ContinuationOverride),
 });
 
 // Parallel task item (within a parallel step)
@@ -125,6 +134,7 @@ const ParallelTaskSchema = Type.Object({
 	model: Type.Optional(Type.String({ description: "Override model for this task" })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
+	continuation: Type.Optional(ContinuationOverride),
 });
 
 const DynamicExpandSchema = Type.Object({
@@ -153,6 +163,7 @@ const DynamicParallelTemplateSchema = Type.Object({
 	model: Type.Optional(Type.String({ description: "Override model for this task" })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
+	continuation: Type.Optional(ContinuationOverride),
 }, { additionalProperties: false });
 
 const DynamicCollectSchema = Type.Object({
@@ -179,6 +190,7 @@ const ChainItem = Type.Object({
 	model: Type.Optional(Type.String({ description: "Override model for this step" })),
 	toolBudget: Type.Optional(ToolBudgetOverride),
 	acceptance: Type.Optional(AcceptanceOverride),
+	continuation: Type.Optional(ContinuationOverride),
 	parallel: Type.Optional(Type.Unsafe({
 		anyOf: [
 			Type.Array(ParallelTaskSchema, { minItems: 1, description: "Tasks to run in parallel" }),
@@ -292,6 +304,7 @@ const SubagentParamsSchema = Type.Object({
 	skill: Type.Optional(SkillOverride),
 	model: Type.Optional(Type.String({ description: "Override model for single agent (e.g. 'anthropic/claude-sonnet-4')" })),
 	acceptance: Type.Optional(AcceptanceOverride),
+	continuation: Type.Optional(ContinuationOverride),
 });
 
 export const SubagentParams = keepTopLevelParameterDescriptions(SubagentParamsSchema);

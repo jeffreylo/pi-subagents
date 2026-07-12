@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { formatDuration, formatModelThinking, formatTokens, shortenPath } from "../../shared/formatters.ts";
 import { formatActivityLabel, formatParallelOutcome } from "../../shared/status-format.ts";
-import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type CostSummary, type NestedRunSummary, type SubagentRunMode, type TokenUsage, type TurnBudgetState } from "../../shared/types.ts";
+import { type ActivityState, type AsyncJobStep, type AsyncParallelGroupStatus, type AsyncStatus, type CostSummary, type ExecutionState, type NestedRunSummary, type ResultDisposition, type SubagentRunMode, type TokenUsage, type TurnBudgetState } from "../../shared/types.ts";
 import { readStatus } from "../../shared/utils.ts";
 import { attachRootChildrenToSteps, buildNestedRouteIndex, type NestedRoute, projectNestedEvents } from "../shared/nested-events.ts";
 import { formatNestedRunStatusLines } from "../shared/nested-render.ts";
@@ -17,6 +17,9 @@ interface AsyncRunStepSummary {
 	outputName?: string;
 	structured?: boolean;
 	status: AsyncJobStep["status"];
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
+	continuation?: import("../../shared/types.ts").ContinuationState;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
 	currentTool?: string;
@@ -50,6 +53,9 @@ export interface AsyncRunSummary {
 	asyncDir: string;
 	sessionId?: string;
 	state: "queued" | "running" | "complete" | "failed" | "paused" | "stopped";
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
+	continuation?: import("../../shared/types.ts").ContinuationState;
 	error?: string;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
@@ -170,6 +176,9 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.outputName ? { outputName: step.outputName } : {}),
 			...(step.structured ? { structured: step.structured } : {}),
 			status: step.status,
+			...(step.executionState ? { executionState: step.executionState } : {}),
+			...(step.resultDisposition ? { resultDisposition: step.resultDisposition } : {}),
+			...(step.continuation ? { continuation: step.continuation } : {}),
 			...(stepActivityState ? { activityState: stepActivityState } : {}),
 			...(stepLastActivityAt ? { lastActivityAt: stepLastActivityAt } : {}),
 			...(step.currentTool ? { currentTool: step.currentTool } : {}),
@@ -204,6 +213,9 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 		asyncDir,
 		...(status.sessionId ? { sessionId: status.sessionId } : {}),
 		state: status.state,
+		...(status.executionState ? { executionState: status.executionState } : {}),
+		...(status.resultDisposition ? { resultDisposition: status.resultDisposition } : {}),
+		...(status.continuation ? { continuation: status.continuation } : {}),
 		...(status.error ? { error: status.error } : {}),
 		activityState,
 		lastActivityAt,

@@ -165,7 +165,7 @@ export function formatControlNoticeMessage(event: ControlEvent, childIntercomTar
 	const runTarget = event.runId;
 	if (event.reason === "completion_guard") {
 		return [
-			`Subagent failed: ${event.agent}`,
+			`Subagent result rejected: ${event.agent}`,
 			`Run: ${runTarget}${event.index !== undefined ? ` step ${event.index + 1}` : ""}`,
 			`Signal: ${event.message}`,
 			"Next: read the output artifact or session from the subagent result, then retry with a more explicit implementation prompt or handle the fix directly.",
@@ -205,7 +205,7 @@ export function formatControlNoticeMessage(event: ControlEvent, childIntercomTar
 
 export function formatControlIntercomMessage(event: ControlEvent, childIntercomTarget?: string): string {
 	const statusLabel = event.reason === "completion_guard"
-		? "subagent failed"
+		? "subagent result rejected"
 		: event.type === "active_long_running"
 			? "subagent active but long-running"
 			: "subagent needs attention";
@@ -213,7 +213,7 @@ export function formatControlIntercomMessage(event: ControlEvent, childIntercomT
 		statusLabel,
 		"",
 		event.reason === "completion_guard"
-			? `${event.agent} failed in run ${event.runId}.`
+			? `${event.agent} completed execution but its result was rejected in run ${event.runId}.`
 			: event.type === "active_long_running"
 				? `${event.agent} is still active but long-running in run ${event.runId}.`
 				: `${event.agent} needs attention in run ${event.runId}.`,

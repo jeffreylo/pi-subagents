@@ -38,13 +38,13 @@ describe("result intercom formatter", () => {
 		});
 
 		assert.equal(payload.status, "failed");
-		assert.equal(payload.summary, "1 completed, 1 failed");
+		assert.equal(payload.summary, "1 failed, 1 completed");
 		assert.equal(payload.children.length, 2);
 		assert.match(payload.message, /^subagent results/m);
 		assert.match(payload.message, /Run: run-123/);
 		assert.match(payload.message, /Mode: chain/);
 		assert.match(payload.message, /Status: failed/);
-		assert.match(payload.message, /Children: 1 completed, 1 failed/);
+		assert.match(payload.message, /Children: 1 failed, 1 completed/);
 		assert.match(payload.message, /Chain steps: 4/);
 		assert.match(payload.message, /Intercom targets below identify child sessions used while they were running/);
 		assert.match(payload.message, /1\. reviewer-a — completed/);
@@ -61,14 +61,26 @@ describe("result intercom formatter", () => {
 			mode: "parallel",
 			source: "foreground",
 			children: [
-				{ agent: "acceptance-check", status: "failed", summary: "evidence missing", acceptance: { status: "rejected" } },
-				{ agent: "execution-check", status: "failed", summary: "process exited" },
+				{
+					agent: "acceptance-check",
+					status: "completed",
+					executionState: "completed",
+					resultDisposition: { status: "rejected", source: "acceptance", reason: "Acceptance rejected: evidence missing" },
+					summary: "produced output",
+					acceptance: { status: "rejected" },
+				},
+				{ agent: "execution-check", status: "failed", executionState: "failed", summary: "process exited" },
 			],
 		});
 
 		assert.equal(payload.status, "failed");
-		assert.equal(payload.summary, "2 failed");
-		assert.match(payload.message, /1\. acceptance-check — acceptance rejected/);
+		assert.equal(payload.summary, "1 failed, 1 rejected");
+		assert.equal(payload.executionState, "failed");
+		assert.equal(payload.resultDisposition?.status, "rejected");
+		assert.match(payload.message, /Children: 1 failed, 1 rejected/);
+		assert.match(payload.message, /1\. acceptance-check — completed; result rejected/);
+		assert.match(payload.message, /Action required:\nAcceptance rejected: evidence missing/);
+		assert.match(payload.message, /Produced output:\nproduced output/);
 		assert.match(payload.message, /2\. execution-check — failed/);
 	});
 
@@ -210,7 +222,7 @@ describe("result intercom formatter", () => {
 		});
 
 		assert.match(receipt, /Delivered parallel subagent results via intercom\./);
-		assert.match(receipt, /Children: 1 completed, 1 failed/);
+		assert.match(receipt, /Children: 1 failed, 1 completed/);
 		assert.match(receipt, /Artifacts:\n- a \[completed\]: \/tmp\/a\.md/);
 		assert.match(receipt, /Run intercom targets \(may be inactive after completion\):\n- a \[completed\]: subagent-a-run-abc-1/);
 		assert.match(receipt, /Sessions:\n- b \[failed\]: \/tmp\/b\.jsonl/);

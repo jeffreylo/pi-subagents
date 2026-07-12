@@ -28,6 +28,8 @@ interface AsyncResultPayload {
 	lifecycleArtifactVersion?: number;
 	success: boolean;
 	state?: string;
+	executionState?: string;
+	resultDisposition?: { status?: string; source?: string; reason?: string };
 	exitCode?: number;
 	sessionId?: string;
 	mode?: string;
@@ -41,7 +43,8 @@ interface AsyncResultPayload {
 	wrapUpRequested?: boolean;
 	totalTokens?: { input: number; output: number; total: number };
 	totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
-	results: Array<{ output?: string; success?: boolean; error?: string; timedOut?: boolean; turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; exceededAtTurn?: number }; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; artifactPaths?: { inputPath?: string; outputPath?: string; metadataPath?: string }; artifactError?: string; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown } }>;
+	continuation?: { attempts?: Array<{ attempt?: number; action?: string; reason?: string }>; terminalReason?: string };
+	results: Array<{ output?: string; success?: boolean; executionState?: string; resultDisposition?: { status?: string; source?: string; reason?: string }; continuation?: { attempts?: Array<{ attempt?: number; action?: string; reason?: string }>; terminalReason?: string }; error?: string; timedOut?: boolean; turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; exceededAtTurn?: number }; turnBudgetExceeded?: boolean; wrapUpRequested?: boolean; model?: string; attemptedModels?: string[]; modelAttempts?: Array<{ success?: boolean; error?: string }>; totalCost?: { inputTokens: number; outputTokens: number; costUsd: number }; artifactPaths?: { inputPath?: string; outputPath?: string; metadataPath?: string }; artifactError?: string; structuredOutput?: unknown; intercomTarget?: string; acceptance?: { status?: string; childReport?: unknown; reviewResult?: { status?: string; findings?: Array<{ severity?: string; file?: string; issue?: string; rationale?: string }> } } }>;
 	outputs?: Record<string, { text?: string; structured?: unknown }>;
 	workflowGraph?: { nodes?: Array<{ kind?: string; label?: string; phase?: string; status?: string; error?: string; outputName?: string; structured?: boolean; children?: Array<{ label?: string; outputName?: string; itemKey?: string; status?: string; error?: string }> }> };
 }
@@ -53,6 +56,9 @@ interface AsyncStatusPayload {
 	currentTool?: string;
 	currentPath?: string;
 	state?: string;
+	executionState?: string;
+	resultDisposition?: { status?: string; source?: string; reason?: string };
+	continuation?: { attempts?: Array<{ attempt?: number; action?: string; reason?: string }>; terminalReason?: string };
 	error?: string;
 	timeoutMs?: number;
 	deadlineAt?: number;
@@ -72,6 +78,9 @@ interface AsyncStatusPayload {
 		activityState?: string;
 		currentTool?: string;
 		status?: string;
+		executionState?: string;
+		resultDisposition?: { status?: string; source?: string; reason?: string };
+		continuation?: { attempts?: Array<{ attempt?: number; action?: string; reason?: string }>; terminalReason?: string };
 		exitCode?: number;
 		timedOut?: boolean;
 		error?: string;
@@ -79,7 +88,7 @@ interface AsyncStatusPayload {
 		thinking?: string;
 		tokens?: { total: number };
 		totalCost?: { inputTokens: number; outputTokens: number; costUsd: number };
-		acceptance?: { status?: string };
+		acceptance?: { status?: string; reviewResult?: { status?: string; findings?: Array<{ severity?: string; file?: string; issue?: string; rationale?: string }> } };
 		turnBudget?: { maxTurns: number; graceTurns: number; outcome: string; turnCount: number; wrapUpRequestedAtTurn?: number; exceededAtTurn?: number };
 		turnBudgetExceeded?: boolean;
 		wrapUpRequested?: boolean;
@@ -855,7 +864,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		assert.equal(fs.existsSync(path.join(tempDir, "progress.md")), false);
 	});
 
-	it("async single rejects explicit reviewed acceptance without a reviewer result", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+	it("async reviewed acceptance requires a parent decision when no reviewer agent is configured", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({
 			output: [
 				"implemented",
@@ -890,17 +899,162 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			artifactConfig,
 			shareEnabled: false,
 			maxSubagentDepth: 2,
-			acceptance: { level: "reviewed", criteria: ["Patch bug"], review: false },
+			acceptance: { level: "reviewed", criteria: ["Patch bug"], review: { required: true } },
 		});
 		const resultPath = await waitForAsyncResultFile(id, 10_000);
 		const result = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
 		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
 
-		assert.equal(result.success, false);
+		assert.equal(result.success, true);
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.executionState, "completed");
+		assert.equal(result.resultDisposition?.status, "review-required");
+		assert.equal(result.resultDisposition?.source, "independent-review");
+		assert.match(result.resultDisposition?.reason ?? "", /Independent acceptance review is required but no reviewer result is available\. Parent action is required\./);
+		assert.equal(result.continuation?.terminalReason, "parent-decision-required");
+		assert.equal(result.results[0]?.executionState, "completed");
+		assert.equal(result.results[0]?.resultDisposition?.status, "review-required");
 		assert.equal(result.results[0]?.acceptance?.status, "rejected");
 		assert.ok(result.results[0]?.acceptance?.childReport);
 		assert.equal(result.results[0]?.acceptance?.reviewResult?.status, "needs-parent-decision");
+		assert.equal(result.results[0]?.continuation?.terminalReason, "parent-decision-required");
+		assert.equal(status.executionState, "completed");
+		assert.equal(status.resultDisposition?.status, "review-required");
+		assert.equal(status.continuation?.terminalReason, "parent-decision-required");
+		assert.equal(status.steps?.[0]?.executionState, "completed");
+		assert.equal(status.steps?.[0]?.resultDisposition?.status, "review-required");
 		assert.equal(status.steps?.[0]?.acceptance?.status, "rejected");
+		assert.equal(status.steps?.[0]?.continuation?.terminalReason, "parent-decision-required");
+		assert.equal(mockPi.callCount(), 1);
+	});
+
+	it("async reviewed acceptance continues through an independent no-blockers review", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const acceptanceEvidence = [
+			"implemented",
+			"```acceptance-report",
+			JSON.stringify({
+				criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "patched" }],
+				changedFiles: ["src/file.ts"],
+				testsAddedOrUpdated: ["test/file.test.ts"],
+				commandsRun: [{ command: "npm test", result: "passed", summary: "passed" }],
+				validationOutput: ["passed"],
+				residualRisks: [],
+				noStagedFiles: true,
+			}),
+			"```",
+		].join("\n");
+		const reviewResult = { status: "no-blockers", findings: [] };
+		mockPi.onCall({ matchArgIncludes: "Implement reviewed fix", output: acceptanceEvidence });
+		mockPi.onCall({ matchArgIncludes: "Independently review", output: "review complete", structuredOutput: reviewResult });
+
+		const id = `async-reviewed-continuation-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Implement reviewed fix",
+			agentConfig: makeAgent("worker", { completionGuard: false }),
+			agents: [makeAgent("reviewer")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-reviewed-continuation" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+			acceptance: { level: "reviewed", criteria: ["Patch bug"], review: { required: true } },
+		});
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const result = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		const child = result.results[0];
+
+		assert.equal(result.success, true);
+		assert.equal(result.executionState, "completed");
+		assert.equal(result.resultDisposition?.status, "accepted");
+		assert.equal(child?.executionState, "completed");
+		assert.equal(child?.resultDisposition?.status, "accepted");
+		assert.equal(child?.acceptance?.status, "reviewed");
+		assert.deepEqual(child?.acceptance?.reviewResult, reviewResult);
+		assert.deepEqual(child?.continuation?.attempts?.map((attempt) => attempt.action), ["initial", "review"]);
+		assert.equal(child?.continuation?.terminalReason, "accepted");
+		assert.equal(status.executionState, "completed");
+		assert.equal(status.resultDisposition?.status, "accepted");
+		assert.equal(status.continuation?.terminalReason, "accepted");
+		assert.equal(status.steps?.[0]?.executionState, "completed");
+		assert.equal(status.steps?.[0]?.resultDisposition?.status, "accepted");
+		assert.equal(status.steps?.[0]?.acceptance?.status, "reviewed");
+		assert.deepEqual(status.steps?.[0]?.acceptance?.reviewResult, reviewResult);
+		assert.deepEqual(status.steps?.[0]?.continuation?.attempts?.map((attempt) => attempt.action), ["initial", "review"]);
+	});
+
+	it("async reviewed acceptance fixes reviewer blockers before re-review", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		const acceptanceEvidence = (message: string) => [
+			message,
+			"```acceptance-report",
+			JSON.stringify({
+				criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "patched" }],
+				changedFiles: ["src/file.ts"],
+				testsAddedOrUpdated: ["test/file.test.ts"],
+				commandsRun: [{ command: "npm test", result: "passed", summary: "passed" }],
+				validationOutput: ["passed"],
+				residualRisks: [],
+				noStagedFiles: true,
+			}),
+			"```",
+		].join("\n");
+		const blocker = {
+			severity: "blocker",
+			file: "src/file.ts",
+			issue: "Missing boundary check",
+			rationale: "The unchecked boundary permits invalid input.",
+		};
+		mockPi.onCall({ matchArgIncludes: "Implement blocker-reviewed fix", output: acceptanceEvidence("initial implementation") });
+		mockPi.onCall({ matchArgIncludes: ["Independently review", "initial implementation"], output: "blocker found", structuredOutput: { status: "blockers", findings: [blocker] } });
+		mockPi.onCall({ matchArgIncludes: "Continuation feedback", output: acceptanceEvidence("boundary fixed") });
+		mockPi.onCall({ matchArgIncludes: ["Independently review", "boundary fixed"], output: "re-review complete", structuredOutput: { status: "no-blockers", findings: [] } });
+
+		const id = `async-reviewed-blocker-continuation-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Implement blocker-reviewed fix",
+			agentConfig: makeAgent("worker", { completionGuard: false }),
+			agents: [makeAgent("reviewer")],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-reviewed-blocker-continuation" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+			acceptance: { level: "reviewed", criteria: ["Patch bug"], review: { required: true } },
+			continuation: { maxAttempts: 2 },
+		});
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const result = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		const child = result.results[0];
+		const attempts = child?.continuation?.attempts ?? [];
+		const writerAttempts = attempts.filter((attempt) => attempt.action === "initial" || attempt.action === "fix");
+		const reviewPhases = attempts.filter((attempt) => attempt.action === "review");
+		const exactFinding = "blocker | file=src/file.ts | issue=Missing boundary check | rationale=The unchecked boundary permits invalid input.";
+
+		assert.equal(result.executionState, "completed");
+		assert.equal(result.resultDisposition?.status, "accepted");
+		assert.equal(child?.acceptance?.status, "reviewed");
+		assert.equal(child?.acceptance?.reviewResult?.status, "no-blockers");
+		assert.equal(writerAttempts.length, 2);
+		assert.deepEqual(writerAttempts.map((attempt) => attempt.attempt), [1, 2]);
+		assert.equal(reviewPhases.length, 2);
+		assert.deepEqual(reviewPhases.map((attempt) => attempt.attempt), [1, 2]);
+		assert.match(reviewPhases[0]?.reason ?? "", new RegExp(exactFinding.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		assert.equal(child?.continuation?.terminalReason, "accepted");
+		assert.equal(status.resultDisposition?.status, "accepted");
+		assert.equal(status.steps?.[0]?.continuation?.terminalReason, "accepted");
+
+		assert.equal(mockPi.callCount(), 4);
+		const calls = [0, 1, 2, 3].map((index) => readMockPiArgs(mockPi, index));
+		assert.match(calls[0]?.at(-1) ?? "", /Implement blocker-reviewed fix/);
+		assert.match(calls[1]?.at(-1) ?? "", /Independently review/);
+		assert.match(calls[2]?.at(-1) ?? "", /Continuation feedback/);
+		assert.match(calls[2]?.at(-1) ?? "", new RegExp(exactFinding.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		assert.match(calls[3]?.at(-1) ?? "", /Independently review/);
+		const initialSession = calls[0]?.[calls[0].indexOf("--session") + 1];
+		const fixSession = calls[2]?.[calls[2].indexOf("--session") + 1];
+		assert.ok(initialSession, "expected initial writer session");
+		assert.equal(fixSession, initialSession, "writer fix must continue in the same session");
 	});
 
 	it("top-level async chain suppresses progress for {task} review-only tasks", { skip: !isAsyncAvailable() || !createSubagentExecutor ? "jiti or executor not available" : undefined }, async () => {
@@ -2094,10 +2248,12 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
 		assert.equal(payload.success, false);
 		assert.equal(payload.exitCode, 1);
+		assert.equal(payload.executionState, "failed");
 		assert.equal(payload.results[0].success, false);
+		assert.equal(payload.results[0].executionState, "failed");
 	});
 
-	it("background implementation runs fail when no mutation attempt occurred", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+	it("background implementation runs preserve execution success when completion guard rejects", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
 		mockPi.onCall({ output: "I’ll do that now and report back after implementing." });
 
 		const id = `async-no-mutation-${Date.now().toString(36)}`;
@@ -2120,6 +2276,7 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 			shareEnabled: false,
 			sessionRoot,
 			maxSubagentDepth: 2,
+			continuation: false,
 		});
 
 		const deadline = Date.now() + 10_000;
@@ -2131,18 +2288,106 @@ describe("async execution utilities", { skip: !available ? "pi packages not avai
 		}
 
 		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8"));
-		assert.equal(payload.success, false);
-		assert.equal(payload.exitCode, 1);
-		assert.equal(payload.results[0].success, false);
-		assert.match(String(payload.results[0].error ?? ""), /completed without making edits/);
-		assert.match(String(payload.results[0].modelAttempts?.[0]?.error ?? ""), /completed without making edits/);
+		assert.equal(payload.success, true);
+		assert.equal(payload.exitCode, 0);
+		assert.equal(payload.executionState, "completed");
+		assert.equal(payload.resultDisposition?.status, "rejected");
+		assert.equal(payload.continuation?.terminalReason, "disabled");
+		assert.equal(payload.results[0].success, true);
+		assert.equal(payload.results[0].executionState, "completed");
+		assert.equal(payload.results[0].resultDisposition?.status, "rejected");
+		assert.equal(payload.results[0].continuation?.attempts.filter((attempt: { action?: string }) => attempt.action !== "review").length, 1);
+		assert.equal(payload.results[0].error, undefined);
+		assert.equal(payload.results[0].modelAttempts?.[0]?.error, undefined);
 
 		const eventsPath = path.join(ASYNC_DIR, id, "events.jsonl");
 		const eventsText = fs.readFileSync(eventsPath, "utf-8");
 		assert.match(eventsText, /"reason":"completion_guard"/);
-		assert.match(eventsText, /Subagent failed: worker/);
+		assert.doesNotMatch(eventsText, /Subagent failed: worker/);
 		assert.doesNotMatch(eventsText, /Status:/);
 		assert.doesNotMatch(eventsText, /Interrupt:/);
+	});
+
+	it("background continuation stops after two identical writer rejections", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "I will implement this later." });
+		mockPi.onCall({ output: "I will implement this later." });
+
+		const id = `async-identical-rejection-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Implement the approved fixes",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-identical-rejection" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions-identical-rejection"),
+			maxSubagentDepth: 2,
+		});
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		const history = payload.results[0]?.continuation?.attempts ?? [];
+
+		assert.equal(payload.results[0]?.continuation?.terminalReason, "identical-rejection");
+		assert.deepEqual(history.map((attempt) => attempt.action), ["initial", "fix"]);
+		assert.deepEqual(history.map((attempt) => attempt.attempt), [1, 2]);
+		assert.equal(status.steps?.[0]?.continuation?.terminalReason, "identical-rejection");
+		assert.deepEqual(status.steps?.[0]?.continuation?.attempts?.map((attempt) => attempt.action), ["initial", "fix"]);
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("background continuation does not repeat an unsafe non-idempotent task", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ output: "I will implement this later." });
+
+		const id = `async-non-idempotent-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Implement the deployment config and deploy the release",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-non-idempotent" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions-non-idempotent"),
+			maxSubagentDepth: 2,
+		});
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+
+		assert.equal(payload.results[0]?.continuation?.terminalReason, "non-idempotent-uncertainty");
+		assert.deepEqual(payload.results[0]?.continuation?.attempts?.map((attempt) => attempt.action), ["initial"]);
+		assert.equal(status.steps?.[0]?.continuation?.terminalReason, "non-idempotent-uncertainty");
+		assert.deepEqual(status.steps?.[0]?.continuation?.attempts?.map((attempt) => attempt.action), ["initial"]);
+		assert.equal(mockPi.callCount(), 1);
+	});
+
+	it("background continuation does not retry a true execution failure", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ exitCode: 1, stderr: "provider failed" });
+
+		const id = `async-execution-failure-${Date.now().toString(36)}`;
+		executeAsyncSingle(id, {
+			agent: "worker",
+			task: "Implement the approved fixes",
+			agentConfig: makeAgent("worker"),
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-execution-failure" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			sessionRoot: path.join(tempDir, "sessions-execution-failure"),
+			maxSubagentDepth: 2,
+		});
+
+		const resultPath = await waitForAsyncResultFile(id, 10_000);
+		const payload = JSON.parse(fs.readFileSync(resultPath, "utf-8")) as AsyncResultPayload;
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+
+		assert.equal(payload.executionState, "failed");
+		assert.equal(payload.results[0]?.continuation?.terminalReason, "execution-not-completed");
+		assert.deepEqual(payload.results[0]?.continuation?.attempts?.map((attempt) => attempt.action), ["initial"]);
+		assert.equal(status.steps?.[0]?.continuation?.terminalReason, "execution-not-completed");
+		assert.deepEqual(status.steps?.[0]?.continuation?.attempts?.map((attempt) => attempt.action), ["initial"]);
+		assert.equal(mockPi.callCount(), 1);
 	});
 
 	it("background bash-enabled non-implementation agents can opt out of the completion guard", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {

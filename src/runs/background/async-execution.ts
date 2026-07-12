@@ -29,6 +29,7 @@ import { createStructuredOutputRuntime } from "../shared/structured-output.ts";
 import { resolveEffectiveAcceptance } from "../shared/acceptance.ts";
 import {
 	type AcceptanceInput,
+	type ContinuationInput,
 	type ArtifactConfig,
 	type Details,
 	type MaxOutputConfig,
@@ -139,6 +140,7 @@ interface AsyncChainParams {
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	nestedRoute?: NestedRouteInfo;
 	acceptance?: AcceptanceInput;
+	continuation?: ContinuationInput;
 	timeoutMs?: number;
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
@@ -151,6 +153,7 @@ interface AsyncSingleParams {
 	agent: string;
 	task?: string;
 	agentConfig: AgentConfig;
+	agents?: AgentConfig[];
 	ctx: AsyncExecutionContext;
 	cwd?: string;
 	maxOutput?: MaxOutputConfig;
@@ -176,6 +179,7 @@ interface AsyncSingleParams {
 	childIntercomTarget?: (agent: string, index: number) => string | undefined;
 	nestedRoute?: NestedRouteInfo;
 	acceptance?: AcceptanceInput;
+	continuation?: ContinuationInput;
 	timeoutMs?: number;
 	turnBudget?: ResolvedTurnBudget;
 	toolBudget?: ResolvedToolBudget;
@@ -217,6 +221,7 @@ export type AsyncRunnerStepBuildResult =
 		runnerCwd: string;
 		workflowGraph: ReturnType<typeof buildWorkflowGraphSnapshot>;
 		eventChain: ChainStep[];
+		reviewerSteps?: Record<string, RunnerSubagentStep>;
 		originalTask?: string;
 	}
 	| { error: string };
@@ -492,6 +497,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			outputMode: behavior.outputMode,
 			sessionFile,
 			maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, a.maxSubagentDepth),
+			continuation: s.continuation ?? params.continuation,
 			effectiveAcceptance: resolveEffectiveAcceptance({
 				explicit: s.acceptance,
 				agentName: s.agent,
@@ -569,6 +575,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 					label: s.label,
 					sessionFiles: dynamicFlatSteps.map((step) => step.sessionFile),
 					forkSafetyInfo: dynamicFlatSteps.map((step) => step.forkSafetyInfo),
+					continuation: s.continuation ?? params.continuation,
 					effectiveAcceptance: resolveEffectiveAcceptance({
 						explicit: s.acceptance,
 						agentName: s.parallel.agent,
@@ -582,6 +589,16 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 			const staticStep = nextFlatStep();
 			return buildSeqStep(s as SequentialStep, staticStep.sessionFile, undefined, false, undefined, staticStep.index);
 		});
+		const reviewerNames = new Set<string>(["reviewer"]);
+		for (const chainStep of chain) {
+			const acceptance = "acceptance" in chainStep && typeof chainStep.acceptance === "object" && chainStep.acceptance !== null && chainStep.acceptance !== false ? chainStep.acceptance : undefined;
+			if (acceptance?.review && acceptance.review !== false && acceptance.review.agent) reviewerNames.add(acceptance.review.agent);
+		}
+		const reviewerSteps: Record<string, RunnerSubagentStep> = {};
+		for (const reviewerName of reviewerNames) {
+			if (!agents.some((agent) => agent.name === reviewerName)) continue;
+			reviewerSteps[reviewerName] = buildSeqStep({ agent: reviewerName, task: "Independent acceptance review", acceptance: false, continuation: false }, undefined, runnerCwd, false, undefined, 0);
+		}
 		const steps = params.attachRoot
 			? [{
 					agent: params.attachRoot.agent,
@@ -598,7 +615,7 @@ export function buildAsyncRunnerSteps(id: string, params: AsyncRunnerStepBuildPa
 					inheritSkills: false,
 				}, ...builtSteps]
 			: builtSteps;
-		return { steps, runnerCwd, workflowGraph, eventChain: graphChain, ...(originalTask !== undefined ? { originalTask } : {}) };
+		return { steps, runnerCwd, workflowGraph, eventChain: graphChain, ...(Object.keys(reviewerSteps).length ? { reviewerSteps } : {}), ...(originalTask !== undefined ? { originalTask } : {}) };
 	} catch (error) {
 		if (error instanceof UnavailableSubagentSkillError || error instanceof AsyncStartValidationError) return { error: error.message };
 		throw error;
@@ -679,7 +696,7 @@ export function executeAsyncChain(
 		}
 		return formatAsyncStartError(resultMode, built.error);
 	}
-	const { steps, runnerCwd, workflowGraph, eventChain } = built;
+	const { steps, reviewerSteps, runnerCwd, workflowGraph, eventChain } = built;
 	const deadlineAt = params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined;
 	const initialTurnBudget = params.turnBudget ? initialTurnBudgetState(params.turnBudget) : undefined;
 	let childTargetIndex = 0;
@@ -704,6 +721,7 @@ export function executeAsyncChain(
 			{
 				id,
 				steps,
+				reviewerSteps,
 				resultPath: inheritedNestedRoute ? nestedResultsPath(inheritedNestedRoute.rootRunId, id) : path.join(RESULTS_DIR, `${id}.json`),
 				cwd: runnerCwd,
 				placeholder: "{previous}",
@@ -933,6 +951,27 @@ export function executeAsyncSingle(
 	if (resolvedToolBudget.error) return formatAsyncStartError("single", resolvedToolBudget.error);
 	const deadlineAt = params.timeoutMs !== undefined ? Date.now() + params.timeoutMs : undefined;
 	const initialTurnBudget = params.turnBudget ? initialTurnBudgetState(params.turnBudget) : undefined;
+	const reviewerSteps: Record<string, RunnerSubagentStep> = {};
+	for (const reviewerConfig of params.agents ?? []) {
+		const configuredReviewer = typeof params.acceptance === "object" && params.acceptance !== null && params.acceptance !== false && params.acceptance.review && params.acceptance.review !== false ? params.acceptance.review.agent : undefined;
+		if (reviewerConfig.name !== "reviewer" && reviewerConfig.name !== configuredReviewer) continue;
+		reviewerSteps[reviewerConfig.name] = {
+			agent: reviewerConfig.name,
+			task: "Independent acceptance review",
+			cwd: runnerCwd,
+			model: reviewerConfig.model,
+			modelCandidates: buildModelCandidates(reviewerConfig.model, reviewerConfig.fallbackModels, availableModels, ctx.currentModelProvider, { scope: ctx.modelScope }),
+			tools: reviewerConfig.tools,
+			extensions: reviewerConfig.extensions,
+			subagentOnlyExtensions: reviewerConfig.subagentOnlyExtensions,
+			mcpDirectTools: reviewerConfig.mcpDirectTools,
+			completionGuard: false,
+			systemPrompt: reviewerConfig.systemPrompt,
+			systemPromptMode: reviewerConfig.systemPromptMode,
+			inheritProjectContext: reviewerConfig.inheritProjectContext,
+			inheritSkills: reviewerConfig.inheritSkills,
+		};
+	}
 	let spawnResult: { pid?: number; error?: string } = {};
 	try {
 		spawnResult = spawnRunner(
@@ -963,6 +1002,7 @@ export function executeAsyncSingle(
 						outputMode,
 						sessionFile,
 						maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, agentConfig.maxSubagentDepth),
+						continuation: params.continuation,
 						effectiveAcceptance: resolveEffectiveAcceptance({
 							explicit: params.acceptance,
 							agentName: agent,
@@ -973,6 +1013,7 @@ export function executeAsyncSingle(
 						...(resolvedToolBudget.budget ? { toolBudget: resolvedToolBudget.budget } : {}),
 					},
 				],
+				reviewerSteps,
 				resultPath: inheritedNestedRoute ? nestedResultsPath(inheritedNestedRoute.rootRunId, id) : path.join(RESULTS_DIR, `${id}.json`),
 				cwd: runnerCwd,
 				placeholder: "{previous}",

@@ -207,7 +207,8 @@ describe("subagent control attention state", () => {
 
 		const message = formatControlNoticeMessage(event, "subagent-worker-78f659a3-1");
 
-		assert.match(message, /Subagent failed: worker/);
+		assert.match(message, /Subagent result rejected: worker/);
+		assert.doesNotMatch(message, /Subagent failed/);
 		assert.match(message, /read the output artifact or session/);
 		assert.match(message, /Run intercom target \(may be inactive\): subagent-worker-78f659a3-1/);
 		assert.doesNotMatch(message, /Status:/);

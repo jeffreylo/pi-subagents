@@ -85,6 +85,17 @@ function resetWidgetLayout(): void {
 }
 
 describe("subagent async widget rendering", () => {
+	it("separates failed, rejected, and review-required terminal rendering", () => {
+		const lines = buildWidgetLines([
+			{ asyncId: "failed", asyncDir: "/tmp/failed", status: "failed", executionState: "failed", startedAt: 0, updatedAt: 1000 },
+			{ asyncId: "rejected", asyncDir: "/tmp/rejected", status: "complete", executionState: "completed", resultDisposition: { status: "rejected", source: "acceptance", reason: "rejected" }, startedAt: 0, updatedAt: 1000 },
+			{ asyncId: "review", asyncDir: "/tmp/review", status: "complete", executionState: "completed", resultDisposition: { status: "review-required", source: "independent-review", reason: "review" }, startedAt: 0, updatedAt: 1000 },
+		], theme, 160, false);
+		assert.match(lines.join("\n"), /✗ subagent[^\n]*\n[^\n]*Failed/);
+		assert.match(lines.join("\n"), /⚠ subagent[^\n]*\n[^\n]*Result rejected/);
+		assert.match(lines.join("\n"), /⚠ subagent[^\n]*\n[^\n]*Review required/);
+	});
+
 	it("orders running jobs before queued summaries and completions", () => {
 		const lines = buildWidgetLines([
 			{ asyncId: "done-1", asyncDir: "/tmp/done", status: "complete", agents: ["reviewer"], startedAt: 0, updatedAt: 1000 },

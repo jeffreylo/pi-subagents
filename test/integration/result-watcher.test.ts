@@ -70,6 +70,45 @@ describe("result watcher", () => {
 		}
 	});
 
+	it("derives clean execution and review-required disposition from legacy policy-failure artifacts", async () => {
+		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-legacy-outcome-"));
+		try {
+			const emitted: Array<{ event: string; data: unknown }> = [];
+			const state = createState();
+			state.currentSessionId = "session-legacy";
+			const watcher = createResultWatcher({ events: { on: () => () => {}, emit(event: string, data: unknown) { emitted.push({ event, data }); } } }, state, resultsDir, 60_000);
+			try {
+				fs.writeFileSync(path.join(resultsDir, "legacy.json"), JSON.stringify({
+					id: "legacy",
+					sessionId: "session-legacy",
+					agent: "reviewer",
+					success: false,
+					state: "failed",
+					summary: "review output",
+					results: [{
+						agent: "reviewer",
+						output: "review output",
+						success: false,
+						exitCode: 1,
+						acceptance: { status: "rejected", reviewResult: { status: "needs-parent-decision", findings: [] } },
+					}],
+				}), "utf-8");
+				watcher.primeExistingResults();
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			} finally {
+				watcher.stopResultWatcher();
+			}
+			const completion = emitted.find((entry) => entry.event === "subagent:async-complete")?.data;
+			assert.ok(completion && typeof completion === "object");
+			const child = (completion as { results?: Array<{ status?: string; executionState?: string; resultDisposition?: { status?: string } }> }).results?.[0];
+			assert.equal(child?.status, "completed");
+			assert.equal(child?.executionState, "completed");
+			assert.equal(child?.resultDisposition?.status, "review-required");
+		} finally {
+			fs.rmSync(resultsDir, { recursive: true, force: true });
+		}
+	});
+
 	it("delivers result files only to the exact owning session when another watcher shares the same repo", async () => {
 		const resultsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-result-watcher-scope-"));
 		const createPi = () => {
@@ -326,7 +365,7 @@ describe("result watcher", () => {
 			assert.equal(payload.mode, "parallel");
 			assert.equal(payload.status, "failed");
 			assert.match(String(payload.message ?? ""), /Run: run-fallback/);
-			assert.match(String(payload.message ?? ""), /Children: 1 completed, 1 failed/);
+			assert.match(String(payload.message ?? ""), /Children: 1 failed, 1 completed/);
 			assert.equal(payload.children?.[0]?.sessionPath, childSessionPath);
 			assert.equal(completion?.results?.[0]?.sessionPath, childSessionPath);
 			assert.equal(payload.children?.[1]?.status, "failed");

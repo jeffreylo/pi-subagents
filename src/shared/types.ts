@@ -210,6 +210,11 @@ export interface ControlEvent {
 	recentFailureSummary?: string;
 }
 
+export type ExecutionState = "completed" | "failed" | "timed-out" | "budget-exceeded" | "paused" | "stopped" | "detached";
+export type ResultDisposition =
+	| { status: "accepted" | "not-required" }
+	| { status: "rejected"; source: "acceptance" | "completion-guard"; reason: string }
+	| { status: "review-required"; source: "independent-review"; reason: string };
 export type SubagentResultStatus = "completed" | "failed" | "paused" | "stopped" | "detached";
 export type SubagentRunMode = "single" | "parallel" | "chain";
 export const SUBAGENT_LIFECYCLE_ARTIFACT_VERSION = 1;
@@ -217,7 +222,7 @@ export type SubagentLifecycleArtifactVersion = typeof SUBAGENT_LIFECYCLE_ARTIFAC
 
 export type PublicNestedStepSummary = Pick<
 	NestedStepSummary,
-	"agent" | "status" | "sessionFile" | "transcriptPath" | "transcriptError" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "toolBudget" | "toolBudgetBlocked" | "startedAt" | "endedAt" | "error" | "timedOut" | "stopped"
+	"agent" | "status" | "executionState" | "resultDisposition" | "sessionFile" | "transcriptPath" | "transcriptError" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "toolBudget" | "toolBudgetBlocked" | "startedAt" | "endedAt" | "error" | "timedOut" | "stopped"
 > & {
 	children?: PublicNestedRunSummary[];
 };
@@ -230,7 +235,7 @@ export type CostSummary = {
 
 export type PublicNestedRunSummary = Pick<
 	NestedRunSummary,
-	"id" | "parentRunId" | "parentStepIndex" | "parentAgent" | "depth" | "path" | "asyncDir" | "sessionId" | "sessionFile" | "intercomTarget" | "ownerIntercomTarget" | "leafIntercomTarget" | "ownerState" | "mode" | "state" | "agent" | "agents" | "currentStep" | "chainStepCount" | "parallelGroups" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "toolBudget" | "toolBudgetBlocked" | "totalTokens" | "totalCost" | "startedAt" | "endedAt" | "lastUpdate" | "error" | "timeoutMs" | "deadlineAt" | "timedOut" | "stopped" | "turnBudget" | "turnBudgetExceeded" | "wrapUpRequested"
+	"id" | "parentRunId" | "parentStepIndex" | "parentAgent" | "depth" | "path" | "asyncDir" | "sessionId" | "sessionFile" | "intercomTarget" | "ownerIntercomTarget" | "leafIntercomTarget" | "ownerState" | "mode" | "state" | "executionState" | "resultDisposition" | "agent" | "agents" | "currentStep" | "chainStepCount" | "parallelGroups" | "activityState" | "lastActivityAt" | "currentTool" | "currentToolStartedAt" | "currentPath" | "turnCount" | "toolCount" | "toolBudget" | "toolBudgetBlocked" | "totalTokens" | "totalCost" | "startedAt" | "endedAt" | "lastUpdate" | "error" | "timeoutMs" | "deadlineAt" | "timedOut" | "stopped" | "turnBudget" | "turnBudgetExceeded" | "wrapUpRequested"
 > & {
 	steps?: PublicNestedStepSummary[];
 	children?: PublicNestedRunSummary[];
@@ -240,6 +245,9 @@ export interface SubagentResultIntercomChild {
 	agent: string;
 	status: SubagentResultStatus;
 	summary: string;
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
+	continuation?: ContinuationState;
 	acceptance?: Pick<AcceptanceLedger, "status">;
 	index?: number;
 	artifactPath?: string;
@@ -256,6 +264,9 @@ export interface SubagentResultIntercomPayload {
 	mode: SubagentRunMode;
 	status: SubagentResultStatus;
 	summary: string;
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
+	continuation?: ContinuationState;
 	source: "foreground" | "async";
 	children: SubagentResultIntercomChild[];
 	asyncId?: string;
@@ -373,6 +384,31 @@ export interface AcceptanceConfig {
 
 export type AcceptanceInput = AcceptanceLevel | false | AcceptanceConfig;
 
+export interface ContinuationConfig {
+	maxAttempts?: number;
+}
+
+export type ContinuationInput = ContinuationConfig | false;
+export type ContinuationAction = "initial" | "fix" | "review";
+export type ContinuationTerminalReason = "accepted" | "disabled" | "execution-not-completed" | "parent-decision-required" | "non-idempotent-uncertainty" | "identical-rejection" | "attempts-exhausted" | "spawn-limit" | "no-actionable-reason";
+
+export interface ContinuationAttempt {
+	attempt: number;
+	action: ContinuationAction;
+	reason?: string;
+	signature?: string;
+	executionState: ExecutionState;
+	resultDisposition: ResultDisposition;
+	output?: string;
+}
+
+export interface ContinuationState {
+	maxAttempts: number;
+	attempts: ContinuationAttempt[];
+	currentAction?: ContinuationAction;
+	terminalReason?: ContinuationTerminalReason;
+}
+
 export interface ResolvedAcceptanceGate extends AcceptanceGate {
 	id: string;
 	must: string;
@@ -475,6 +511,9 @@ export interface SingleResult {
 	agent: string;
 	task: string;
 	exitCode: number;
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
+	continuation?: ContinuationState;
 	detached?: boolean;
 	detachedReason?: string;
 	interrupted?: boolean;
@@ -601,6 +640,8 @@ export interface NestedRunAddress {
 export interface NestedStepSummary {
 	agent: string;
 	status: "pending" | "running" | "complete" | "completed" | "failed" | "paused" | "stopped";
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
 	sessionFile?: string;
 	transcriptPath?: string;
 	transcriptError?: string;
@@ -638,6 +679,8 @@ export interface NestedRunSummary extends NestedRunAddress {
 	capabilityToken?: string;
 	mode?: SubagentRunMode;
 	state: NestedRunState;
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
 	agent?: string;
 	agents?: string[];
 	currentStep?: number;
@@ -701,6 +744,9 @@ export interface AsyncStatus {
 	sessionId?: string;
 	mode: SubagentRunMode;
 	state: "queued" | "running" | "complete" | "failed" | "paused" | "stopped";
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
+	continuation?: ContinuationState;
 	error?: string;
 	activityState?: ActivityState;
 	lastActivityAt?: number;
@@ -737,6 +783,9 @@ export interface AsyncStatus {
 		outputName?: string;
 		structured?: boolean;
 		status: "pending" | "running" | "complete" | "completed" | "failed" | "paused" | "stopped";
+		executionState?: ExecutionState;
+		resultDisposition?: ResultDisposition;
+		continuation?: ContinuationState;
 		children?: NestedRunSummary[];
 		sessionFile?: string;
 		transcriptPath?: string;
@@ -795,6 +844,9 @@ export interface AsyncJobState {
 	asyncId: string;
 	asyncDir: string;
 	status: "queued" | "running" | "complete" | "failed" | "paused" | "stopped";
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
+	continuation?: ContinuationState;
 	pid?: number;
 	sessionId?: string;
 	activityState?: ActivityState;
@@ -842,6 +894,8 @@ export interface ForegroundResumeChild {
 	index: number;
 	sessionFile?: string;
 	status: SubagentResultStatus;
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
 	exitCode?: number;
 	finalOutput?: string;
 	outputMode?: OutputMode;
@@ -989,6 +1043,8 @@ export interface RunSyncOptions {
 		outputPath: string;
 	};
 	acceptance?: AcceptanceInput;
+	continuation?: ContinuationInput;
+	reserveContinuationSpawn?: () => boolean;
 	acceptanceContext?: {
 		mode?: SubagentRunMode;
 		async?: boolean;

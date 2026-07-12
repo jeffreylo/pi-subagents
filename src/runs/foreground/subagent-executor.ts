@@ -39,6 +39,7 @@ import type { ScheduledRunAction } from "../background/scheduled-runs.ts";
 import { enqueueChainAppendRequest, readPendingChainAppendRequests, runnerStepOutputNames } from "../background/chain-append.ts";
 import { ChainOutputValidationError, validateChainOutputBindingsWithContext } from "../shared/chain-outputs.ts";
 import { validateAcceptanceInput } from "../shared/acceptance.ts";
+import { resolveContinuationMaxAttempts } from "../shared/continuation.ts";
 import { createForkContextResolver, type ForkSafetyInfo } from "../../shared/fork-context.ts";
 import { resolveCurrentSessionId } from "../../shared/session-identity.ts";
 import { applyIntercomBridgeToAgent, INTERCOM_BRIDGE_MARKER, resolveIntercomBridge, resolveIntercomSessionTarget, resolveSubagentIntercomTarget, type IntercomBridgeState } from "../../intercom/intercom-bridge.ts";
@@ -78,6 +79,7 @@ import {
 import {
 	type AgentProgress,
 	type AcceptanceInput,
+	type ContinuationInput,
 	type ArtifactConfig,
 	type ArtifactPaths,
 	type ControlConfig,
@@ -124,6 +126,7 @@ interface TaskParam {
 	model?: string;
 	skill?: string | string[] | boolean;
 	acceptance?: AcceptanceInput;
+	continuation?: ContinuationInput;
 	toolBudget?: ToolBudgetConfig;
 }
 
@@ -166,6 +169,7 @@ export interface SubagentParamsLike {
 	agentScope?: unknown;
 	chainDir?: string;
 	acceptance?: AcceptanceInput;
+	continuation?: ContinuationInput;
 	schedule?: string;
 	scheduleName?: string;
 }
@@ -340,6 +344,8 @@ function rememberForegroundRun(state: SubagentState, input: { runId: string; mod
 				agent: result.agent,
 				index,
 				status: resolveSubagentResultStatus({ exitCode: result.exitCode, interrupted: result.interrupted, detached: result.detached }),
+				executionState: result.executionState,
+				resultDisposition: result.resultDisposition,
 				updatedAt,
 				...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
 				...(result.finalOutput ? { finalOutput: result.finalOutput } : {}),
@@ -374,6 +380,8 @@ function updateRememberedForegroundChild(state: SubagentState, input: { runId: s
 		agent: input.result.agent,
 		index: input.index,
 		status: resolveSubagentResultStatus({ exitCode: input.result.exitCode, interrupted: input.result.interrupted, detached: false }),
+		executionState: input.result.executionState,
+		resultDisposition: input.result.resultDisposition,
 		updatedAt,
 		...(input.result.exitCode !== undefined ? { exitCode: input.result.exitCode } : {}),
 		...(input.result.finalOutput ? { finalOutput: input.result.finalOutput } : {}),
@@ -1266,11 +1274,14 @@ function resultSummaryForIntercom(result: SingleResult): string {
 }
 
 function formatFailedSingleRunOutput(result: SingleResult, displayOutput: string): string {
-	const error = result.error || "Failed";
+	const dispositionReason = result.resultDisposition?.status === "rejected" || result.resultDisposition?.status === "review-required"
+		? result.resultDisposition.reason
+		: undefined;
+	const error = dispositionReason ?? result.error ?? "Failed";
 	const output = displayOutput.trim();
 	const lines = [error];
 	if (output && output !== error.trim()) {
-		lines.push("", "Output:", output);
+		lines.push("", dispositionReason ? "Produced output:" : "Output:", output);
 	}
 	if (result.artifactPaths?.outputPath) {
 		lines.push("", `Output artifact: ${result.artifactPaths.outputPath}`);
@@ -1303,8 +1314,12 @@ async function emitForegroundResultIntercom(input: {
 			exitCode: result.exitCode,
 			interrupted: result.interrupted,
 			detached: result.detached,
+			resultDisposition: result.resultDisposition,
 		}),
 		summary: resultSummaryForIntercom(result),
+		executionState: result.executionState,
+		resultDisposition: result.resultDisposition,
+		continuation: result.continuation,
 		...(result.acceptance ? { acceptance: { status: result.acceptance.status } } : {}),
 		index,
 		artifactPath: result.artifactPaths?.outputPath,
@@ -1901,6 +1916,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			...(task.progress !== undefined ? { progress: task.progress } : {}),
 			...(task.toolBudget !== undefined ? { toolBudget: task.toolBudget } : {}),
 			...(task.acceptance !== undefined ? { acceptance: task.acceptance } : {}),
+			...(task.continuation !== undefined ? { continuation: task.continuation } : {}),
 		}));
 		return executeAsyncChain(id, {
 			chain: [{
@@ -1965,6 +1981,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			controlIntercomTarget,
 			childIntercomTarget,
 			nestedRoute,
+			continuation: params.continuation,
 			timeoutMs: data.timeoutMs,
 			turnBudget: data.turnBudget,
 			toolBudget: data.toolBudget,
@@ -1993,6 +2010,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			agent: params.agent!,
 			task: shouldForkAgent(contextPolicy, params.agent!) ? wrapForkTask(params.task ?? "") : (params.task ?? ""),
 			agentConfig: a,
+			agents,
 			ctx: asyncCtx,
 			availableModels,
 			cwd: effectiveCwd,
@@ -2017,6 +2035,7 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 			childIntercomTarget: childIntercomTarget ? (agent, index) => childIntercomTarget(agent, index) : undefined,
 			nestedRoute,
 			acceptance: params.acceptance,
+			continuation: params.continuation,
 			timeoutMs: data.timeoutMs,
 			turnBudget: data.turnBudget,
 			toolBudget: data.toolBudget,
@@ -2182,6 +2201,8 @@ interface ForegroundParallelRunInput {
 	agents: AgentConfig[];
 	ctx: ExtensionContext;
 	state: SubagentState;
+	config: ExtensionConfig;
+	continuation?: ContinuationInput;
 	intercomEvents: IntercomEventBus;
 	signal: AbortSignal;
 	runId: string;
@@ -2395,6 +2416,8 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			modelScope: input.modelScope,
 			skills: effectiveSkills === false ? [] : effectiveSkills,
 			acceptance: task.acceptance,
+			continuation: task.continuation ?? input.continuation,
+			reserveContinuationSpawn: () => !reserveSubagentSpawns({ state: input.state, config: input.config, sessionId: input.state.currentSessionId, requested: 1, mode: "parallel" }),
 			acceptanceContext: { mode: "parallel" },
 			timeoutMs: input.timeoutMs,
 			deadlineAt: input.deadlineAt,
@@ -2603,6 +2626,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 					...(progress !== undefined ? { progress } : {}),
 					...(t.toolBudget !== undefined ? { toolBudget: t.toolBudget } : {}),
 					...(t.acceptance !== undefined ? { acceptance: t.acceptance } : {}),
+					...(t.continuation !== undefined ? { continuation: t.continuation } : {}),
 				};
 			});
 			return executeAsyncChain(id, {
@@ -2683,6 +2707,8 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			agents,
 			ctx,
 			state: deps.state,
+			config: deps.config,
+			continuation: params.continuation,
 			intercomEvents: deps.pi.events,
 			signal,
 			runId,
@@ -2776,12 +2802,17 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		}
 
 		const worktreeSuffix = buildParallelWorktreeSuffix(worktreeSetup, artifactsDir, tasks);
-		const ok = results.filter((result) => result.exitCode === 0).length;
+		const failed = results.filter((result) => result.exitCode !== 0).length;
+		const rejected = results.filter((result) => result.resultDisposition?.status === "rejected").length;
+		const reviewRequired = results.filter((result) => result.resultDisposition?.status === "review-required").length;
+		const completed = results.length - failed - rejected - reviewRequired;
 		const downgradeNote = backgroundRequestedWhileClarifying ? " (background requested, but clarify kept this run foreground)" : "";
 		const aggregatedOutput = aggregateParallelOutputs(
 			results.map((result) => ({
 				agent: result.agent,
-				output: result.truncation?.text || getSingleResultOutput(result),
+				output: result.resultDisposition?.status === "rejected" || result.resultDisposition?.status === "review-required"
+					? `${result.resultDisposition.reason}\n\nProduced output:\n${result.truncation?.text || getSingleResultOutput(result)}`
+					: result.truncation?.text || getSingleResultOutput(result),
 				exitCode: result.exitCode,
 				error: result.error,
 				timedOut: result.timedOut,
@@ -2789,7 +2820,13 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			(i, agent) => `=== Task ${i + 1}: ${agent} ===`,
 		);
 
-		const summary = `${ok}/${results.length} succeeded${downgradeNote}`;
+		const countParts = [
+			failed ? `${failed} failed` : undefined,
+			rejected ? `${rejected} rejected` : undefined,
+			reviewRequired ? `${reviewRequired} review required` : undefined,
+			completed ? `${completed} completed` : undefined,
+		].filter((part): part is string => Boolean(part));
+		const summary = `${countParts.join(", ")}${downgradeNote}`;
 		const fullContent = worktreeSuffix
 			? `${summary}\n\n${aggregatedOutput}\n\n${worktreeSuffix}`
 			: `${summary}\n\n${aggregatedOutput}`;
@@ -3022,6 +3059,8 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		modelScope: data.modelScope,
 		skills: effectiveSkills,
 		acceptance: params.acceptance,
+		continuation: params.continuation,
+		reserveContinuationSpawn: () => !reserveSubagentSpawns({ state: deps.state, config: deps.config, sessionId: deps.state.currentSessionId, requested: 1, mode: "single" }),
 		acceptanceContext: { mode: "single" },
 		onDetachedExit: (result) => updateRememberedForegroundChild(deps.state, { runId, mode: "single", cwd: effectiveCwd, index: 0, result }),
 		timeoutMs: data.timeoutMs,
@@ -3108,6 +3147,12 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		};
 	}
 
+	if (r.resultDisposition?.status === "rejected" || r.resultDisposition?.status === "review-required") {
+		return {
+			content: [{ type: "text", text: formatFailedSingleRunOutput(r, finalizedOutput.displayOutput) }],
+			details,
+		};
+	}
 	if (r.exitCode !== 0)
 		return {
 			content: [{ type: "text", text: formatFailedSingleRunOutput(r, finalizedOutput.displayOutput) }],
@@ -3546,14 +3591,41 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			: undefined;
 
 		const foregroundMode: "single" | "parallel" | "chain" = hasChain ? "chain" : hasTasks ? "parallel" : "single";
+		if (effectiveAsync && hasChain && effectiveParams.chain) {
+			const chainWorktreeTaskCwdError = buildChainWorktreeTaskCwdError(effectiveParams.chain as ChainStep[], effectiveCwd);
+			if (chainWorktreeTaskCwdError) {
+				return {
+					content: [{ type: "text", text: chainWorktreeTaskCwdError }],
+					isError: true,
+					details: { mode: "chain" as const, results: [] },
+				};
+			}
+		}
+		if (effectiveAsync && hasTasks && effectiveParams.tasks && effectiveParams.worktree) {
+			const worktreeTaskCwdError = buildParallelWorktreeTaskCwdError(effectiveParams.tasks, effectiveCwd);
+			if (worktreeTaskCwdError) return buildParallelModeError(worktreeTaskCwdError);
+		}
+
+		const requestedSpawns = countRequestedSubagentSpawns(effectiveParams, deps.config);
 		const spawnLimitError = reserveSubagentSpawns({
 			state: deps.state,
 			config: deps.config,
 			sessionId: deps.state.currentSessionId,
-			requested: countRequestedSubagentSpawns(effectiveParams, deps.config),
+			requested: requestedSpawns,
 			mode: foregroundMode,
 		});
 		if (spawnLimitError) return spawnLimitError;
+		if (effectiveParams.async === true) {
+			const writerAttempts = resolveContinuationMaxAttempts(effectiveParams.continuation);
+			const continuationLimitError = reserveSubagentSpawns({
+				state: deps.state,
+				config: deps.config,
+				sessionId: deps.state.currentSessionId,
+				requested: effectiveParams.continuation === false ? 0 : requestedSpawns * (Math.max(0, writerAttempts - 1) + writerAttempts),
+				mode: foregroundMode,
+			});
+			if (continuationLimitError) return continuationLimitError;
+		}
 
 		const execData: ExecutionContextData = {
 			params: effectiveParams,

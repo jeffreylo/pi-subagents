@@ -8,6 +8,8 @@
 - Added an opt-in read-only subagent watchdog that reviews actual repo edits at safe agent-end boundaries, with visible warnings, main and child watchdog coordination, strong complementary model recommendations, changed-file TypeScript/JavaScript LSP diagnostics, `/subagents-watchdog` status/model commands, and agent-facing watchdog configuration actions. Thanks to can1357/oh-my-pi for the advisor/watchdog concept, and to apmantza/pi-lens, gjczone/pi-shazam, and can1357/oh-my-pi for LSP diagnostics patterns.
 
 ### Changed
+- Separated process execution from result acceptance: `success` and `exitCode` now describe execution only, while `resultDisposition` reports accepted, rejected, or review-required outcomes. Async notifications keep the actionable reason in the compact preview and put produced output in the expanded view.
+- Added bounded automatic continuation for rejected writer results. It defaults to two writer attempts, caps configuration at three, supports `continuation: false`, and bounds independent review phases separately. Continuation stops safely on execution failure, missing actionable feedback, repeated rejection, uncertain non-idempotent work, exhausted attempts, or spawn limits.
 - Updated the bundled `pi-subagents` skill so Fable mode is the default orchestration posture for complex work, and refreshed recent command/config guidance.
 - Documented `contact_supervisor` structured interview requests in the default child bridge instructions.
 

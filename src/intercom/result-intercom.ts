@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import {
 	type Details,
+	type ExecutionState,
 	type IntercomEventBus,
+	type ResultDisposition,
 	type NestedRunSummary,
 	type PublicNestedRunSummary,
 	type SingleResult,
@@ -13,51 +15,56 @@ import {
 	SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT,
 	SUBAGENT_RESULT_INTERCOM_EVENT,
 } from "../shared/types.ts";
+import { aggregateResultDisposition, deriveExecutionState, executionStateToResultStatus } from "../runs/shared/outcome.ts";
 
 export function resolveSubagentResultStatus(input: {
+	executionState?: ExecutionState;
 	exitCode?: number;
 	success?: boolean;
 	state?: string;
 	interrupted?: boolean;
 	detached?: boolean;
+	resultDisposition?: ResultDisposition;
 }): SubagentResultStatus {
-	if (input.detached) return "detached";
-	if (input.state === "stopped") return "stopped";
-	if (input.interrupted || input.state === "paused") return "paused";
-	if (typeof input.success === "boolean") return input.success ? "completed" : "failed";
-	if (input.state === "complete") return "completed";
-	if (input.state === "failed") return "failed";
-	if (typeof input.exitCode === "number") return input.exitCode === 0 ? "completed" : "failed";
-	return "failed";
+	return executionStateToResultStatus(deriveExecutionState(input));
 }
 
-function countStatuses(children: SubagentResultIntercomChild[]): Record<SubagentResultStatus, number> {
-	const counts: Record<SubagentResultStatus, number> = {
-		completed: 0,
-		failed: 0,
-		paused: 0,
-		stopped: 0,
-		detached: 0,
+interface ResultCounts {
+	execution: Record<SubagentResultStatus, number>;
+	rejected: number;
+	reviewRequired: number;
+}
+
+function countStatuses(children: SubagentResultIntercomChild[]): ResultCounts {
+	const counts: ResultCounts = {
+		execution: { completed: 0, failed: 0, paused: 0, stopped: 0, detached: 0 },
+		rejected: 0,
+		reviewRequired: 0,
 	};
 	for (const child of children) {
-		counts[child.status] += 1;
+		counts.execution[child.status] += 1;
+		if (child.resultDisposition?.status === "rejected") counts.rejected += 1;
+		if (child.resultDisposition?.status === "review-required") counts.reviewRequired += 1;
 	}
 	return counts;
 }
 
-function formatStatusCounts(counts: Record<SubagentResultStatus, number>): string {
+function formatStatusCounts(counts: ResultCounts): string {
+	const completed = Math.max(0, counts.execution.completed - counts.rejected - counts.reviewRequired);
 	const parts = [
-		counts.completed ? `${counts.completed} completed` : undefined,
-		counts.failed ? `${counts.failed} failed` : undefined,
-		counts.stopped ? `${counts.stopped} stopped` : undefined,
-		counts.paused ? `${counts.paused} paused` : undefined,
-		counts.detached ? `${counts.detached} detached` : undefined,
+		counts.execution.failed ? `${counts.execution.failed} failed` : undefined,
+		counts.rejected ? `${counts.rejected} rejected` : undefined,
+		counts.reviewRequired ? `${counts.reviewRequired} review required` : undefined,
+		completed ? `${completed} completed` : undefined,
+		counts.execution.stopped ? `${counts.execution.stopped} stopped` : undefined,
+		counts.execution.paused ? `${counts.execution.paused} paused` : undefined,
+		counts.execution.detached ? `${counts.execution.detached} detached` : undefined,
 	].filter((part): part is string => Boolean(part));
 	return parts.length ? parts.join(", ") : "0 results";
 }
 
 function resolveGroupedStatus(children: SubagentResultIntercomChild[]): SubagentResultStatus {
-	const counts = countStatuses(children);
+	const counts = countStatuses(children).execution;
 	if (counts.failed > 0) return "failed";
 	if (counts.stopped > 0) return "stopped";
 	if (counts.paused > 0) return "paused";
@@ -87,6 +94,8 @@ function compactNestedRun(run: NestedRunSummary | PublicNestedRunSummary, depth 
 		...(run.ownerState ? { ownerState: run.ownerState } : {}),
 		...(run.mode ? { mode: run.mode } : {}),
 		state: run.state,
+		...(run.executionState ? { executionState: run.executionState } : {}),
+		...(run.resultDisposition ? { resultDisposition: run.resultDisposition } : {}),
 		...(run.agent ? { agent: run.agent } : {}),
 		...(run.agents?.length ? { agents: run.agents.slice(0, 12) } : {}),
 		...(run.currentStep !== undefined ? { currentStep: run.currentStep } : {}),
@@ -107,6 +116,8 @@ function compactNestedRun(run: NestedRunSummary | PublicNestedRunSummary, depth 
 		...(run.steps?.length ? { steps: run.steps.slice(0, 12).map((step) => ({
 			agent: step.agent,
 			status: step.status,
+			...(step.executionState ? { executionState: step.executionState } : {}),
+			...(step.resultDisposition ? { resultDisposition: step.resultDisposition } : {}),
 			...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
 			...(step.activityState ? { activityState: step.activityState } : {}),
 			...(step.lastActivityAt !== undefined ? { lastActivityAt: step.lastActivityAt } : {}),
@@ -199,9 +210,12 @@ function asyncResumeGuidance(input: {
 }
 
 function resultStatusLabel(child: SubagentResultIntercomChild): string {
-	return child.status === "failed" && child.acceptance?.status === "rejected"
-		? "acceptance rejected"
-		: child.status;
+	const disposition = child.resultDisposition?.status === "rejected"
+		? "result rejected"
+		: child.resultDisposition?.status === "review-required"
+			? "review required"
+			: undefined;
+	return disposition ? `${child.status}; ${disposition}` : child.status;
 }
 
 function formatSubagentResultIntercomMessage(input: {
@@ -245,7 +259,18 @@ function formatSubagentResultIntercomMessage(input: {
 		if (child.artifactPath) lines.push(`Output artifact: ${child.artifactPath}`);
 		if (child.sessionPath) lines.push(`Session: ${child.sessionPath}`);
 		lines.push(...formatNestedResultLines(child.children));
-		lines.push("Summary:");
+		if (child.continuation?.attempts.length) {
+			lines.push("Continuation history:");
+			for (const attempt of child.continuation.attempts) {
+				lines.push(`- attempt ${attempt.attempt} · ${attempt.action}${attempt.reason ? `: ${attempt.reason}` : ""}`);
+			}
+			if (child.continuation.terminalReason) lines.push(`Continuation stopped: ${child.continuation.terminalReason}`);
+		}
+		if (child.resultDisposition?.status === "rejected" || child.resultDisposition?.status === "review-required") {
+			lines.push("Action required:");
+			lines.push(child.resultDisposition.reason);
+		}
+		lines.push("Produced output:");
 		lines.push(child.summary);
 	}
 
@@ -260,6 +285,16 @@ export function buildSubagentResultIntercomPayload(input: GroupedResultIntercomM
 	}));
 	const status = resolveGroupedStatus(children);
 	const summary = formatStatusCounts(countStatuses(children));
+	const executionState: ExecutionState = children.some((child) => child.status === "failed")
+		? "failed"
+		: children.some((child) => child.status === "stopped")
+			? "stopped"
+			: children.some((child) => child.status === "paused")
+				? "paused"
+				: children.some((child) => child.status === "completed")
+					? "completed"
+					: "detached";
+	const resultDisposition = aggregateResultDisposition(children.map((child) => child.resultDisposition));
 	const firstChild = children[0];
 	const payload: SubagentResultIntercomPayload = {
 		to: input.to,
@@ -267,6 +302,8 @@ export function buildSubagentResultIntercomPayload(input: GroupedResultIntercomM
 		mode: input.mode,
 		status,
 		summary,
+		executionState,
+		resultDisposition,
 		source: input.source,
 		children,
 		...(input.asyncId ? { asyncId: input.asyncId } : {}),

@@ -867,6 +867,27 @@ export async function evaluateAcceptance(input: {
 	return ledger;
 }
 
+export function acceptanceReviewFromChildReport(report: AcceptanceReport | undefined): AcceptanceReviewResult | undefined {
+	if (!report?.reviewFindings) return undefined;
+	if (report.reviewFindings.length === 0 || report.reviewFindings.every((finding) => /^no blockers?$/i.test(finding.trim()))) {
+		return { status: "no-blockers", findings: [] };
+	}
+	const findings = report.reviewFindings.map((finding) => {
+		const parentDecision = /parent[- ]decision|product decision|scope decision|architecture decision/i.test(finding);
+		return {
+			severity: parentDecision || /^blocker:/i.test(finding) ? "blocker" as const : "non-blocking" as const,
+			issue: finding.replace(/^(?:blocker|non-blocking):\s*/i, "").trim(),
+			rationale: parentDecision ? "Requires parent decision; automatic continuation cannot decide this finding." : "Reported by the standalone reviewer.",
+		};
+	});
+	return {
+		status: findings.some((finding) => /Requires parent decision/.test(finding.rationale))
+			? "needs-parent-decision"
+			: findings.some((finding) => finding.severity === "blocker") ? "blockers" : "no-blockers",
+		findings,
+	};
+}
+
 export function acceptanceFailureMessage(ledger: AcceptanceLedger): string | undefined {
 	if (ledger.status !== "rejected") return undefined;
 	const failedCheck = ledger.runtimeChecks.find((check) => check.status === "failed");

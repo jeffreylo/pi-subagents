@@ -158,6 +158,30 @@ test("merge-only task with CLI flags and explicit no-edit wording does not count
 });
 
 
+test("resume output-only commit-message delegation ignores generated acceptance implementation text", () => {
+	const task = [
+		"Task: You are reviving a previous subagent conversation.",
+		"",
+		"Original run: 2422442e-1843-448d-a2fc-f40829568f59",
+		"Original agent: worker",
+		"",
+		"Follow-up:",
+		"Write a conventional commit message for the already-completed changes. Output only the commit message.",
+		"",
+		"## Acceptance Contract",
+		"Acceptance level: reviewed",
+		"",
+		"Criteria:",
+		"- criterion-1: Implement the requested change without widening scope",
+	].join("\n");
+	assert.equal(expectsImplementationMutation("worker", task), false);
+	assert.equal(evaluateCompletionMutationGuard({
+		agent: "worker",
+		task,
+		messages: [assistantText("fix: separate execution and result state")],
+	}).triggered, false);
+});
+
 test("worker edit intent covers common docs, config, and source tasks", () => {
 	assert.equal(expectsImplementationMutation("worker", "Update README to mention the native tool"), true);
 	assert.equal(expectsImplementationMutation("worker", "Remove share functionality and all Vercel references"), true);

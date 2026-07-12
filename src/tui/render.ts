@@ -22,6 +22,7 @@ import { formatTokens, formatUsage, formatDuration, formatModelThinking, formatT
 import { getDisplayItems, getSingleResultOutput } from "../shared/utils.ts";
 import { flatToLogicalStepIndex } from "../runs/background/parallel-groups.ts";
 import { formatNestedAggregate } from "../runs/shared/nested-render.ts";
+import { aggregateResultDisposition, resultDispositionIsUnsuccessful, resultDispositionLabel } from "../runs/shared/outcome.ts";
 import { aggregateStepStatus, formatActivityLabel, formatAgentRunningLabel, formatParallelOutcome } from "../shared/status-format.ts";
 
 type Theme = ExtensionContext["ui"]["theme"];
@@ -267,13 +268,14 @@ function firstOutputLine(text: string): string {
 }
 
 function failedResultLabel(result: Details["results"][number] | undefined): string {
-	return result.acceptance?.status === "rejected" ? "acceptance rejected" : "failed";
+	return resultDispositionLabel(result?.resultDisposition) ?? "failed";
 }
 
 function resultStatusLine(result: Details["results"][number], output: string): string {
 	if (result.detached) return result.detachedReason ? `Detached: ${result.detachedReason}` : "Detached";
 	if (result.stopped) return "Stopped";
 	if (result.interrupted) return "Paused";
+	if (result.resultDisposition?.status === "rejected" || result.resultDisposition?.status === "review-required") return result.resultDisposition.reason;
 	if (result.exitCode !== 0) return `Error: ${result.error ?? (firstOutputLine(output) || `exit ${result.exitCode}`)}`;
 	if (result.acceptance?.status && result.acceptance.status !== "not-required") return `Done · acceptance: ${result.acceptance.status}`;
 	if (hasEmptyTextOutputWithoutOutputTarget(result.task, output)) return "Done (no text output)";
@@ -288,6 +290,7 @@ function resultGlyph(result: Details["results"][number], output: string, theme: 
 	if (result.detached) return theme.fg("warning", "■");
 	if (result.stopped) return theme.fg("warning", "■");
 	if (result.interrupted) return theme.fg("warning", "■");
+	if (resultDispositionIsUnsuccessful(result.resultDisposition)) return theme.fg("warning", "⚠");
 	if (result.exitCode !== 0) return theme.fg("error", "✗");
 	if (hasEmptyTextOutputWithoutOutputTarget(result.task, output)) return theme.fg("warning", "✓");
 	return theme.fg("success", "✓");
@@ -357,6 +360,8 @@ function widgetActivity(job: AsyncJobState): string {
 	if (job.status === "paused") return "Paused";
 	if (job.status === "stopped") return "Stopped";
 	if (job.status === "failed") return "Failed";
+	if (job.resultDisposition?.status === "review-required") return "Review required";
+	if (job.resultDisposition?.status === "rejected") return "Result rejected";
 	return "Done";
 }
 
@@ -402,14 +407,16 @@ function widgetJobsRunningSeed(jobs: AsyncJobState[]): number | undefined {
 function widgetStatusGlyph(job: AsyncJobState, theme: Theme): string {
 	if (job.status === "running") return theme.fg("accent", runningGlyph(widgetJobRunningSeed(job)));
 	if (job.status === "queued") return theme.fg("muted", "◦");
+	if (resultDispositionIsUnsuccessful(job.resultDisposition)) return theme.fg("warning", "⚠");
 	if (job.status === "complete") return theme.fg("success", "✓");
 	if (job.status === "paused") return theme.fg("warning", "■");
 	if (job.status === "stopped") return theme.fg("warning", "■");
 	return theme.fg("error", "✗");
 }
 
-function widgetStepGlyph(status: AsyncJobStep["status"], theme: Theme, seed?: number): string {
+function widgetStepGlyph(status: AsyncJobStep["status"], theme: Theme, seed?: number, disposition?: AsyncJobStep["resultDisposition"]): string {
 	if (status === "running") return theme.fg("accent", runningGlyph(seed));
+	if (resultDispositionIsUnsuccessful(disposition)) return theme.fg("warning", "⚠");
 	if (status === "complete" || status === "completed") return theme.fg("success", "✓");
 	if (status === "failed") return theme.fg("error", "✗");
 	if (status === "paused") return theme.fg("warning", "■");
@@ -417,8 +424,10 @@ function widgetStepGlyph(status: AsyncJobStep["status"], theme: Theme, seed?: nu
 	return theme.fg("muted", "◦");
 }
 
-function widgetStepStatus(status: AsyncJobStep["status"], theme: Theme): string {
+function widgetStepStatus(status: AsyncJobStep["status"], theme: Theme, disposition?: AsyncJobStep["resultDisposition"]): string {
 	if (status === "running") return theme.fg("accent", "running");
+	const dispositionLabel = resultDispositionLabel(disposition);
+	if (dispositionLabel) return theme.fg("warning", dispositionLabel);
 	if (status === "complete" || status === "completed") return theme.fg("success", "complete");
 	if (status === "failed") return theme.fg("error", "failed");
 	if (status === "paused") return theme.fg("warning", "paused");
@@ -449,7 +458,9 @@ function widgetChainDetails(job: AsyncJobState, theme: Theme, expanded = false, 
 		const steps = job.steps.slice(span.start, span.start + span.count);
 		if (span.isParallel) {
 			const status = aggregateStepStatus(steps);
-			lines.push(`  ${widgetStepGlyph(status, theme, widgetStepsRunningSeed(steps))} Step ${span.stepIndex + 1}/${total}: ${themeBold(theme, "parallel group")} ${theme.fg("dim", "·")} ${theme.fg("dim", formatParallelOutcome(steps, span.count))}`);
+			const disposition = aggregateResultDisposition(steps.map((step) => step.resultDisposition));
+			const outcome = resultDispositionLabel(disposition) ?? formatParallelOutcome(steps, span.count);
+			lines.push(`  ${widgetStepGlyph(status, theme, widgetStepsRunningSeed(steps), disposition)} Step ${span.stepIndex + 1}/${total}: ${themeBold(theme, "parallel group")} ${theme.fg("dim", "·")} ${theme.fg("dim", outcome)}`);
 			continue;
 		}
 		const step = steps[0];
@@ -473,7 +484,7 @@ function widgetParallelAgentDetails(job: AsyncJobState, theme: Theme, expanded =
 		const activity = widgetStepActivity(step, job.updatedAt);
 		const itemTitle = job.mode === "parallel" || job.activeParallelGroup ? "Agent" : "Step";
 		const modelDisplay = modelThinkingBadge(theme, step.model, step.thinking);
-		lines.push(`  ${theme.fg("dim", `${marker} ${widgetStepGlyph(step.status, theme, widgetStepRunningSeed(step, index))} ${itemTitle} ${index + 1}/${total}: ${step.agent} · ${widgetStepStatus(step.status, theme)}${modelDisplay}${activity ? ` · ${activity}` : ""}`)}`);
+		lines.push(`  ${theme.fg("dim", `${marker} ${widgetStepGlyph(step.status, theme, widgetStepRunningSeed(step, index), step.resultDisposition)} ${itemTitle} ${index + 1}/${total}: ${step.agent} · ${widgetStepStatus(step.status, theme, step.resultDisposition)}${modelDisplay}${activity ? ` · ${activity}` : ""}`)}`);
 		for (const nestedLine of formatNestedWidgetLines(step.children, theme, width, expanded, job.updatedAt, expanded ? 8 : 1)) lines.push(`    ${nestedLine}`);
 	}
 	return lines;
@@ -879,10 +890,10 @@ function foregroundStyleWidgetStepLines(
 	expanded: boolean,
 	width: number,
 ): string[] {
-	const status = widgetStepStatus(step.status, theme);
+	const status = widgetStepStatus(step.status, theme, step.resultDisposition);
 	const stats = widgetStepStats(theme, step);
 	const modelDisplay = modelThinkingBadge(theme, step.model, step.thinking);
-	const lines = [`  ${widgetStepGlyph(step.status, theme, widgetStepRunningSeed(step, index - 1))} ${itemTitle} ${index}/${total}: ${themeBold(theme, step.agent)} ${theme.fg("dim", "·")} ${status}${modelDisplay}${stats ? ` ${theme.fg("dim", "·")} ${stats}` : ""}`];
+	const lines = [`  ${widgetStepGlyph(step.status, theme, widgetStepRunningSeed(step, index - 1), step.resultDisposition)} ${itemTitle} ${index}/${total}: ${themeBold(theme, step.agent)} ${theme.fg("dim", "·")} ${status}${modelDisplay}${stats ? ` ${theme.fg("dim", "·")} ${stats}` : ""}`];
 	const activity = widgetStepActivityLine(step, width, expanded, job.updatedAt);
 	if (activity) lines.push(`    ${theme.fg("dim", `⎿  ${activity}`)}`);
 	for (const nestedLine of formatNestedWidgetLines(step.children, theme, width, expanded, job.updatedAt)) {
@@ -948,12 +959,12 @@ function compactSingleWidgetLines(job: AsyncJobState, theme: Theme, width: numbe
 	const itemTitle = job.mode === "parallel" || job.activeParallelGroup ? "Agent" : "Step";
 	const lines = fullLines.slice(0, 2);
 	for (const [index, step] of job.steps.entries()) {
-		const status = widgetStepStatus(step.status, theme);
+		const status = widgetStepStatus(step.status, theme, step.resultDisposition);
 		const activity = widgetStepActivityLine(step, width, false, job.updatedAt);
 		const stepStats = widgetStepStats(theme, step);
 		const activitySuffix = activity ? ` ${theme.fg("dim", "·")} ${theme.fg("dim", activity)}` : "";
 		const modelDisplay = modelThinkingBadge(theme, step.model, step.thinking);
-		lines.push(`  ${widgetStepGlyph(step.status, theme, widgetStepRunningSeed(step, index))} ${itemTitle} ${index + 1}/${total}: ${themeBold(theme, step.agent)} ${theme.fg("dim", "·")} ${status}${modelDisplay}${activitySuffix}${stepStats ? ` ${theme.fg("dim", "·")} ${stepStats}` : ""}`);
+		lines.push(`  ${widgetStepGlyph(step.status, theme, widgetStepRunningSeed(step, index), step.resultDisposition)} ${itemTitle} ${index + 1}/${total}: ${themeBold(theme, step.agent)} ${theme.fg("dim", "·")} ${status}${modelDisplay}${activitySuffix}${stepStats ? ` ${theme.fg("dim", "·")} ${stepStats}` : ""}`);
 		for (const nestedLine of formatNestedWidgetLines(step.children, theme, width, false, job.updatedAt)) lines.push(`    ${nestedLine}`);
 	}
 	if (job.steps.some((step) => step.status === "running")) lines.push(theme.fg("accent", `  ${liveDetailHintText()}`));
@@ -998,12 +1009,14 @@ function widgetSessionMatches(expanded: boolean): boolean {
 		&& widgetLayoutSession.columns === currentTerminalColumns();
 }
 
-function widgetHeaderCounts(jobs: AsyncJobState[]): { running: AsyncJobState[]; queued: AsyncJobState[]; complete: AsyncJobState[]; failed: AsyncJobState[]; paused: AsyncJobState[]; stopped: AsyncJobState[] } {
+function widgetHeaderCounts(jobs: AsyncJobState[]): { running: AsyncJobState[]; queued: AsyncJobState[]; complete: AsyncJobState[]; failed: AsyncJobState[]; rejected: AsyncJobState[]; reviewRequired: AsyncJobState[]; paused: AsyncJobState[]; stopped: AsyncJobState[] } {
 	return {
 		running: jobs.filter((job) => job.status === "running"),
 		queued: jobs.filter((job) => job.status === "queued"),
-		complete: jobs.filter((job) => job.status === "complete"),
+		complete: jobs.filter((job) => job.status === "complete" && !resultDispositionIsUnsuccessful(job.resultDisposition)),
 		failed: jobs.filter((job) => job.status === "failed"),
+		rejected: jobs.filter((job) => job.resultDisposition?.status === "rejected"),
+		reviewRequired: jobs.filter((job) => job.resultDisposition?.status === "review-required"),
 		paused: jobs.filter((job) => job.status === "paused"),
 		stopped: jobs.filter((job) => job.status === "stopped"),
 	};
@@ -1017,6 +1030,8 @@ function buildSingleLineWidgetLines(jobs: AsyncJobState[], theme: Theme, width: 
 	if (counts.running.length > 0) parts.push(`${counts.running.length}/${jobs.length} running`);
 	if (counts.queued.length > 0) parts.push(`${counts.queued.length} queued`);
 	if (counts.failed.length > 0) parts.push(`${counts.failed.length} failed`);
+	if (counts.rejected.length > 0) parts.push(`${counts.rejected.length} rejected`);
+	if (counts.reviewRequired.length > 0) parts.push(`${counts.reviewRequired.length} review required`);
 	if (counts.stopped.length > 0) parts.push(`${counts.stopped.length} stopped`);
 	if (counts.paused.length > 0) parts.push(`${counts.paused.length} paused`);
 	if (!hasActive && counts.complete.length > 0) parts.push(`${counts.complete.length}/${jobs.length} done`);
@@ -1081,6 +1096,8 @@ function progressiveHeaderLine(jobs: AsyncJobState[], theme: Theme, width: numbe
 	if (counts.queued.length > 0) parts.push(`${counts.queued.length} queued`);
 	if (!hasActive) {
 		if (counts.failed.length > 0) parts.push(`${counts.failed.length} failed`);
+		if (counts.rejected.length > 0) parts.push(`${counts.rejected.length} rejected`);
+		if (counts.reviewRequired.length > 0) parts.push(`${counts.reviewRequired.length} review required`);
 		if (counts.stopped.length > 0) parts.push(`${counts.stopped.length} stopped`);
 		if (counts.paused.length > 0) parts.push(`${counts.paused.length} paused`);
 		if (counts.complete.length > 0) parts.push(`${counts.complete.length}/${jobs.length} done`);
@@ -1106,7 +1123,7 @@ function progressiveHiddenLine(hiddenJobs: AsyncJobState[], theme: Theme, width:
 	const parts: string[] = [];
 	if (counts.running.length > 0) parts.push(`${counts.running.length} running`);
 	if (counts.queued.length > 0) parts.push(`${counts.queued.length} queued`);
-	const finished = counts.complete.length + counts.failed.length + counts.paused.length + counts.stopped.length;
+	const finished = counts.complete.length + counts.failed.length + counts.rejected.length + counts.reviewRequired.length + counts.paused.length + counts.stopped.length;
 	if (finished > 0) parts.push(`${finished} finished`);
 	return truncLine(theme.fg("dim", `  +${hiddenJobs.length} more${parts.length ? ` (${parts.join(", ")})` : ""}`), width);
 }
@@ -1331,6 +1348,7 @@ function renderMultiCompact(d: Details, theme: Theme, frame?: number): Component
 		|| workflowGraphHasStatus(d, ["running"]);
 	const stopped = d.results.some((r) => r.stopped && r.progress?.status !== "running")
 		|| workflowGraphHasStatus(d, ["stopped"]);
+	const rejected = d.results.some((r) => resultDispositionIsUnsuccessful(r.resultDisposition) && r.progress?.status !== "running");
 	const failed = d.results.some((r) => !r.stopped && r.exitCode !== 0 && r.progress?.status !== "running")
 		|| workflowGraphHasStatus(d, ["failed"]);
 	const paused = d.results.some((r) => (r.interrupted || r.detached) && r.progress?.status !== "running")
@@ -1354,13 +1372,15 @@ function renderMultiCompact(d: Details, theme: Theme, frame?: number): Component
 	const stats = statJoin(theme, [multiLabel.headerLabel, formatProgressStats(theme, totalSummary), formatTotalCostStat(d.totalCost)]);
 	const glyph = hasRunning
 		? theme.fg("accent", runningGlyph(frame !== undefined ? (runningSeed(progressRunningSeed(totalSummary), d.currentStepIndex) ?? 0) + frame : runningSeed(progressRunningSeed(totalSummary), d.currentStepIndex)))
-		: stopped
-			? theme.fg("warning", "■")
-			: failed
-				? theme.fg("error", "✗")
-			: paused
+		: failed
+			? theme.fg("error", "✗")
+			: stopped
 				? theme.fg("warning", "■")
-				: theme.fg("success", "✓");
+				: rejected
+					? theme.fg("warning", "⚠")
+					: paused
+						? theme.fg("warning", "■")
+						: theme.fg("success", "✓");
 	const contextBadge = d.context === "fork" ? theme.fg("warning", " [fork]") : "";
 	const c = new Container();
 	const width = getTermWidth() - 4;
@@ -1454,9 +1474,11 @@ export function renderSubagentResult(
 			? theme.fg("warning", "running")
 			: r.detached
 				? theme.fg("warning", "detached")
-				: r.exitCode === 0
-					? theme.fg("success", "ok")
-					: theme.fg("error", failedResultLabel(r));
+				: resultDispositionIsUnsuccessful(r.resultDisposition)
+					? theme.fg("warning", failedResultLabel(r))
+					: r.exitCode === 0
+						? theme.fg("success", "ok")
+						: theme.fg("error", failedResultLabel(r));
 		const contextBadge = d.context === "fork" ? theme.fg("warning", " [fork]") : "";
 		const output = r.truncation?.text || getSingleResultOutput(r);
 
@@ -1519,6 +1541,20 @@ export function renderSubagentResult(
 			if (toolCallLines.length) c.addChild(new Spacer(1));
 		}
 
+		if (r.continuation?.attempts.length) {
+			for (const attempt of r.continuation.attempts) {
+				c.addChild(new Text(fit(theme.fg(attempt.action === "review" ? "accent" : "warning", `Attempt ${attempt.attempt} · ${attempt.action}${attempt.reason ? `: ${attempt.reason}` : ""}`)), 0, 0));
+			}
+			if (r.continuation.terminalReason) c.addChild(new Text(fit(theme.fg("dim", `Continuation: ${r.continuation.terminalReason}`)), 0, 0));
+			c.addChild(new Spacer(1));
+		}
+		if (r.resultDisposition?.status === "rejected" || r.resultDisposition?.status === "review-required") {
+			c.addChild(new Text(fit(theme.fg("warning", r.resultDisposition.reason)), 0, 0));
+			if (output) {
+				c.addChild(new Spacer(1));
+				c.addChild(new Text(fit(theme.fg("dim", "Produced output:")), 0, 0));
+			}
+		}
 		if (output) c.addChild(new Markdown(output, 0, 0, mdTheme));
 		c.addChild(new Spacer(1));
 		if (r.skills?.length) {
@@ -1547,7 +1583,8 @@ export function renderSubagentResult(
 	const hasRunning = d.progress?.some((p) => p.status === "running") 
 		|| d.results.some((r) => r.progress?.status === "running")
 		|| workflowGraphHasStatus(d, ["running"]);
-	const ok = d.results.filter((r) => r.progress?.status === "completed" || (r.exitCode === 0 && r.progress?.status !== "running")).length;
+	const unsuccessfulResults = d.results.filter((r) => resultDispositionIsUnsuccessful(r.resultDisposition));
+	const ok = d.results.filter((r) => !resultDispositionIsUnsuccessful(r.resultDisposition) && (r.progress?.status === "completed" || (r.exitCode === 0 && r.progress?.status !== "running"))).length;
 	const hasEmptyWithoutTarget = d.results.some((r) =>
 		r.exitCode === 0
 		&& r.progress?.status !== "running"
@@ -1562,6 +1599,8 @@ export function renderSubagentResult(
 			? theme.fg("warning", "warning")
 			: hasWorkflowFailure
 				? theme.fg("error", "failed")
+				: unsuccessfulResults.length > 0
+					? theme.fg("warning", unsuccessfulResults.some((result) => result.resultDisposition?.status === "rejected") ? "result rejected" : "review required")
 				: hasWorkflowStop
 					? theme.fg("warning", "stopped")
 					: hasWorkflowPause
@@ -1685,6 +1724,8 @@ export function renderSubagentResult(
 			? theme.fg("warning", "running")
 			: r.exitCode !== 0
 				? theme.fg("error", failedResultLabel(r))
+				: resultDispositionIsUnsuccessful(r.resultDisposition)
+					? theme.fg("warning", failedResultLabel(r))
 				: hasEmptyTextOutputWithoutOutputTarget(r.task, resultOutput)
 					? theme.fg("warning", "warning")
 					: theme.fg("success", "done");

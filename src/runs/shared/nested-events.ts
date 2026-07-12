@@ -12,6 +12,7 @@ import {
 	type NestedRunSummary,
 	type NestedRunState,
 	type NestedStepSummary,
+	type ResultDisposition,
 	type SubagentRunMode,
 	type SubagentState,
 } from "../../shared/types.ts";
@@ -220,6 +221,23 @@ function sanitizeState(value: unknown, fallback: NestedRunState): NestedRunState
 		: fallback;
 }
 
+function sanitizeExecutionState(value: unknown): NestedRunSummary["executionState"] | undefined {
+	return value === "completed" || value === "failed" || value === "timed-out" || value === "budget-exceeded" || value === "paused" || value === "stopped" || value === "detached"
+		? value
+		: undefined;
+}
+
+function sanitizeResultDisposition(value: unknown): ResultDisposition | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const raw = value as Record<string, unknown>;
+	if (raw.status === "accepted" || raw.status === "not-required") return { status: raw.status };
+	const reason = stringValue(raw.reason, 1024);
+	if (!reason) return undefined;
+	if (raw.status === "rejected" && (raw.source === "acceptance" || raw.source === "completion-guard")) return { status: raw.status, source: raw.source, reason };
+	if (raw.status === "review-required" && raw.source === "independent-review") return { status: raw.status, source: raw.source, reason };
+	return undefined;
+}
+
 function sanitizeStep(input: unknown, depth: number): NestedStepSummary | undefined {
 	if (!input || typeof input !== "object") return undefined;
 	const raw = input as Record<string, unknown>;
@@ -231,6 +249,8 @@ function sanitizeStep(input: unknown, depth: number): NestedStepSummary | undefi
 	return {
 		agent,
 		status,
+		...(sanitizeExecutionState(raw.executionState) ? { executionState: sanitizeExecutionState(raw.executionState) } : {}),
+		...(sanitizeResultDisposition(raw.resultDisposition) ? { resultDisposition: sanitizeResultDisposition(raw.resultDisposition) } : {}),
 		...(stringValue(raw.sessionFile, 2048) ? { sessionFile: stringValue(raw.sessionFile, 2048) } : {}),
 		...(raw.activityState === "active_long_running" || raw.activityState === "needs_attention" ? { activityState: raw.activityState } : {}),
 		...(clampNumber(raw.lastActivityAt) !== undefined ? { lastActivityAt: clampNumber(raw.lastActivityAt) } : {}),
@@ -269,6 +289,8 @@ export function sanitizeSummary(input: unknown, depth = 0): NestedRunSummary | u
 		depth: Math.min(Math.max(0, clampNumber(raw.depth) ?? 0), MAX_DEPTH),
 		path: pathParts,
 		state: sanitizeState(raw.state, "running"),
+		...(sanitizeExecutionState(raw.executionState) ? { executionState: sanitizeExecutionState(raw.executionState) } : {}),
+		...(sanitizeResultDisposition(raw.resultDisposition) ? { resultDisposition: sanitizeResultDisposition(raw.resultDisposition) } : {}),
 		...(stringValue(raw.asyncDir, 2048) ? { asyncDir: stringValue(raw.asyncDir, 2048) } : {}),
 		...(clampNumber(raw.pid) !== undefined && clampNumber(raw.pid)! > 0 && Number.isInteger(clampNumber(raw.pid)) ? { pid: clampNumber(raw.pid) } : {}),
 		...(stringValue(raw.sessionId, 256) ? { sessionId: stringValue(raw.sessionId, 256) } : {}),
@@ -848,6 +870,8 @@ export function nestedSummaryFromAsyncStatus(status: AsyncStatus, asyncDir: stri
 		...(status.sessionId ? { sessionId: status.sessionId } : {}),
 		mode: status.mode ?? fallback.mode,
 		state: status.state,
+		...(status.executionState ? { executionState: status.executionState } : {}),
+		...(status.resultDisposition ? { resultDisposition: status.resultDisposition } : {}),
 		...(status.currentStep !== undefined ? { currentStep: status.currentStep } : {}),
 		...(status.chainStepCount !== undefined ? { chainStepCount: status.chainStepCount } : {}),
 		...(status.activityState ? { activityState: status.activityState } : {}),
@@ -873,6 +897,8 @@ export function nestedSummaryFromAsyncStatus(status: AsyncStatus, asyncDir: stri
 		...(status.steps?.length ? { steps: status.steps.map((step) => ({
 			agent: step.agent,
 			status: step.status,
+			...(step.executionState ? { executionState: step.executionState } : {}),
+			...(step.resultDisposition ? { resultDisposition: step.resultDisposition } : {}),
 			...(step.sessionFile ? { sessionFile: step.sessionFile } : {}),
 			...(step.activityState ? { activityState: step.activityState } : {}),
 			...(step.lastActivityAt !== undefined ? { lastActivityAt: step.lastActivityAt } : {}),

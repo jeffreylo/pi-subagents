@@ -390,9 +390,13 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 				agents,
 			),
 		);
-		assert.equal(failed.isError, true);
+		assert.equal(failed.isError, undefined);
+		assert.equal(failed.details.results[0]?.exitCode, 0);
+		assert.equal(failed.details.results[0]?.executionState, "completed");
 		assert.equal(failed.details.results[0]?.acceptance?.status, "rejected");
-		assert.match(failed.details.results[0]?.error ?? "", /tests-added evidence missing/);
+		assert.equal(failed.details.results[0]?.resultDisposition?.status, "rejected");
+		assert.match(failed.details.results[0]?.resultDisposition?.reason ?? "", /tests-added evidence missing/);
+		assert.equal(failed.details.results[0]?.error, undefined);
 	});
 
 	it("runs explicit verified acceptance commands and does not trust child command claims as verification", async () => {
@@ -430,10 +434,14 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 				agents,
 			),
 		);
-		assert.equal(failed.isError, true);
+		assert.equal(failed.isError, undefined);
+		assert.equal(failed.details.results[0]?.exitCode, 0);
+		assert.equal(failed.details.results[0]?.executionState, "completed");
 		assert.equal(failed.details.results[0]?.acceptance?.status, "rejected");
 		assert.equal(failed.details.results[0]?.acceptance?.verifyRuns?.[0]?.status, "failed");
-		assert.match(failed.details.results[0]?.error ?? "", /runtime-fail/);
+		assert.equal(failed.details.results[0]?.resultDisposition?.status, "rejected");
+		assert.match(failed.details.results[0]?.resultDisposition?.reason ?? "", /runtime-fail/);
+		assert.equal(failed.details.results[0]?.error, undefined);
 	});
 
 	it("retries chain steps with fallback models on retryable provider failures", async () => {

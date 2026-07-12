@@ -470,6 +470,28 @@ describe("SubagentParams schema", { skip: !schemasAvailable ? "typebox not avail
 		assert.equal(hasAnyOfType(chainReadsSchema, "boolean"), true);
 	});
 
+	it("validates the public continuation API", { skip: !CompileSchema ? "typebox compiler not available" : undefined }, () => {
+		assert.ok(SubagentParams, "SubagentParams schema should exist");
+		assert.ok(CompileSchema, "TypeBox compiler should exist");
+		const validator = CompileSchema(SubagentParams);
+
+		for (const value of [
+			{ agent: "worker", task: "Fix" },
+			{ agent: "worker", task: "Fix", continuation: false },
+			{ agent: "worker", task: "Fix", continuation: {} },
+			{ agent: "worker", task: "Fix", continuation: { maxAttempts: 1 } },
+			{ agent: "worker", task: "Fix", continuation: { maxAttempts: 2 } },
+			{ agent: "worker", task: "Fix", continuation: { maxAttempts: 3 } },
+		]) assert.equal(validator.Check(value), true, `${JSON.stringify(value)} should validate`);
+
+		for (const value of [
+			{ agent: "worker", task: "Fix", continuation: { maxAttempts: 0 } },
+			{ agent: "worker", task: "Fix", continuation: { maxAttempts: 4 } },
+			{ agent: "worker", task: "Fix", continuation: true },
+			{ agent: "worker", task: "Fix", continuation: { unknown: true } },
+		]) assert.equal(validator.Check(value), false, `${JSON.stringify(value)} should not validate`);
+	});
+
 	it("validates representative flexible field values with TypeBox compiler", { skip: !CompileSchema ? "typebox compiler not available" : undefined }, () => {
 		assert.ok(SubagentParams, "SubagentParams schema should exist");
 		assert.ok(CompileSchema, "TypeBox compiler should exist");

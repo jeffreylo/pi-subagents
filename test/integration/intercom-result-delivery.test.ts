@@ -1039,8 +1039,8 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		assert.equal(intercomEvents.length, 1);
 		const payload = intercomEvents[0]!.payload as { status?: string; summary?: string; message?: string };
 		assert.equal(payload.status, "failed");
-		assert.match(String(payload.summary ?? ""), /1 completed, 1 failed/);
+		assert.match(String(payload.summary ?? ""), /1 failed, 1 completed/);
 		assert.match(String(payload.message ?? ""), /Status: failed/);
-		assert.match(result.content[0]?.text ?? "", /Children: 1 completed, 1 failed/);
+		assert.match(result.content[0]?.text ?? "", /Children: 1 failed, 1 completed/);
 	});
 });

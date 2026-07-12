@@ -85,13 +85,19 @@ test("expanded single-result rendering distinguishes acceptance rejection from e
 		details: { mode: "single", results: [singleResult] },
 	}, { expanded: true }, theme as any));
 
-	const rejected = renderFailure(failedResult(rejectedAcceptance()));
-	assert.match(rejected, /acceptance rejected worker/);
+	const rejected = renderFailure({
+		...result("worker", "produced output"),
+		executionState: "completed",
+		resultDisposition: { status: "rejected", source: "acceptance", reason: "Acceptance rejected: evidence missing" },
+		acceptance: rejectedAcceptance(),
+	});
+	assert.match(rejected, /result rejected worker/);
+	assert.match(rejected, /Acceptance rejected: evidence missing/);
 	assert.doesNotMatch(rejected, /failed worker/);
 
 	const executionFailure = renderFailure(failedResult());
 	assert.match(executionFailure, /failed worker/);
-	assert.doesNotMatch(executionFailure, /acceptance rejected/);
+	assert.doesNotMatch(executionFailure, /result rejected/);
 });
 
 test("compact chain rendering uses workflow graph spans for dynamic fanout results", () => {

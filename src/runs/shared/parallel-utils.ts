@@ -40,6 +40,7 @@ export interface RunnerSubagentStep {
 	};
 	structuredOutputSchema?: import("../../shared/types.ts").JsonSchemaObject;
 	effectiveAcceptance?: import("../../shared/types.ts").ResolvedAcceptanceConfig;
+	continuation?: import("../../shared/types.ts").ContinuationInput;
 	toolBudget?: import("../../shared/types.ts").ResolvedToolBudget;
 }
 

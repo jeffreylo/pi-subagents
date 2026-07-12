@@ -3,7 +3,9 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import type { AgentConfig } from "../../agents/agents.ts";
 import { resolveForkThinkingOverride } from "../../shared/fork-context.ts";
@@ -70,7 +72,9 @@ import {
 	shouldEscalateMutatingFailures,
 	summarizeRecentMutatingFailures,
 } from "../shared/long-running-guard.ts";
-import { acceptanceFailureMessage, evaluateAcceptance, formatAcceptancePrompt, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { acceptanceReviewFromChildReport, evaluateAcceptance, formatAcceptancePrompt, parseAcceptanceReport, resolveEffectiveAcceptance, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { ACCEPTANCE_REVIEW_RESULT_SCHEMA, continuationFeedback, hasNonIdempotentUncertainty, initialContinuationState, parseAcceptanceReviewResult, rejectionSignature, resolveContinuationMaxAttempts, shouldContinueRejectedResult } from "../shared/continuation.ts";
+import { COMPLETION_GUARD_REJECTION_REASON, deriveExecutionState, deriveResultDisposition } from "../shared/outcome.ts";
 import { appendTurnBudgetSystemPrompt, formatTurnBudgetOutput, initialTurnBudgetState, shouldAbortForTurnBudget, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
 import { initialToolBudgetState, toolBudgetState } from "../shared/tool-budget.ts";
 import { resolveWatchdogConfig } from "../../watchdog/settings.ts";
@@ -1054,10 +1058,11 @@ async function runSingleAttempt(
 		})
 		: undefined;
 	if (completionGuard?.triggered && !observedMutationAttempt) {
-		result.exitCode = 1;
-		result.error = "Subagent completed without making edits for an implementation task.\nIt appears to have returned planning or scratchpad output instead of applying changes.";
-		progress.status = "failed";
-		progress.error = result.error;
+		result.resultDisposition = {
+			status: "rejected",
+			source: "completion-guard",
+			reason: COMPLETION_GUARD_REJECTION_REASON,
+		};
 		emitControlEvent(buildControlEvent({
 			from: progress.activityState,
 			to: "needs_attention",
@@ -1338,6 +1343,10 @@ export async function runSync(
 		if (sessionFile) result.sessionFile = sessionFile;
 	}
 
+	const acceptanceOutput = acceptanceOutputByResult.get(result) ?? result.finalOutput ?? "";
+	const selfReviewResult = /(?:^|[-_.])(?:code-)?reviewer(?:$|[-_.])/i.test(agentName)
+		? acceptanceReviewFromChildReport(parseAcceptanceReport(acceptanceOutput).report)
+		: undefined;
 	result.acceptance = result.detached
 		? buildSkippedAcceptanceLedger(effectiveAcceptance, { id: "detached", message: "Acceptance was not evaluated because the subagent detached for intercom coordination before task completion." })
 		: result.timedOut
@@ -1346,19 +1355,172 @@ export async function runSync(
 			? buildSkippedAcceptanceLedger(effectiveAcceptance, { id: "turn-budget", message: "Acceptance was not evaluated because the subagent exceeded its turn budget." })
 			: await evaluateAcceptance({
 			acceptance: effectiveAcceptance,
-			output: acceptanceOutputByResult.get(result) ?? result.finalOutput ?? "",
+			output: acceptanceOutput,
 			cwd: options.cwd ?? runtimeCwd,
+			...(selfReviewResult ? { reviewResult: selfReviewResult } : {}),
 		});
-	const acceptanceFailure = acceptanceFailureMessage(result.acceptance);
 	stripAcceptanceReportsFromMessages(result.messages);
-	if (acceptanceFailure && result.acceptance.explicit && result.exitCode === 0 && !result.detached && !result.interrupted && !result.timedOut) {
-		result.exitCode = 1;
-		result.error = result.error ? `${result.error}\n${acceptanceFailure}` : acceptanceFailure;
-		if (result.progress) {
-			result.progress.status = "failed";
-			result.progress.error = result.error;
-		}
+	result.executionState = deriveExecutionState(result);
+	if (!result.resultDisposition || result.resultDisposition.status !== "rejected") {
+		result.resultDisposition = deriveResultDisposition(result);
 	}
 
-	return result;
+	const maxAttempts = resolveContinuationMaxAttempts(options.continuation);
+	const continuation = initialContinuationState(maxAttempts, result);
+	result.continuation = continuation;
+	if (result.executionState !== "completed") {
+		continuation.terminalReason = "execution-not-completed";
+		return result;
+	}
+	if (result.resultDisposition.status === "accepted" || result.resultDisposition.status === "not-required") {
+		continuation.terminalReason = "accepted";
+		return result;
+	}
+
+	const reviewResultFor = async (current: SingleResult, writerAttempt: number): Promise<"accepted" | "rejected" | "stop"> => {
+		if (!current.acceptance || current.resultDisposition?.status !== "review-required") return "stop";
+		if (options.continuation === false) return "stop";
+		if (options.reserveContinuationSpawn && !options.reserveContinuationSpawn()) {
+			continuation.terminalReason = "spawn-limit";
+			return "stop";
+		}
+		const reviewerName = current.acceptance.effectiveAcceptance.review && current.acceptance.effectiveAcceptance.review !== false
+			? current.acceptance.effectiveAcceptance.review.agent ?? "reviewer"
+			: "reviewer";
+		if (!agents.some((candidate) => candidate.name === reviewerName)) {
+			continuation.terminalReason = "parent-decision-required";
+			return "stop";
+		}
+		const tempDir = mkdtempSync(path.join(os.tmpdir(), "pi-subagent-review-"));
+		const schemaPath = path.join(tempDir, "review.schema.json");
+		const outputPath = path.join(tempDir, "review.json");
+		writeFileSync(schemaPath, JSON.stringify(ACCEPTANCE_REVIEW_RESULT_SCHEMA), "utf-8");
+		try {
+			continuation.currentAction = "review";
+			const review = await runSync(runtimeCwd, agents, reviewerName, [
+				"Independently review the completed implementation in the actual cwd/worktree.",
+				"Inspect the current diff and the child acceptance evidence. Do not edit files.",
+				"Use structured_output with an AcceptanceReviewResult. Mark product/scope/architecture choices as needs-parent-decision.",
+				`Original agent: ${agentName}`,
+				`Original task: ${task}`,
+				`Produced output/evidence:\n${current.finalOutput ?? "(no output)"}`,
+			].join("\n\n"), {
+				...options,
+				acceptance: false,
+				continuation: false,
+				reserveContinuationSpawn: undefined,
+				sessionFile: undefined,
+				outputPath: undefined,
+				outputMode: "inline",
+				artifactsDir: undefined,
+				structuredOutput: { schema: ACCEPTANCE_REVIEW_RESULT_SCHEMA, schemaPath, outputPath },
+			});
+			const structuredReview = review.executionState === "completed" ? parseAcceptanceReviewResult(review.structuredOutput) : undefined;
+			const reviewFindings = structuredReview?.findings.map((finding) => [
+				finding.severity,
+				finding.file ? `file=${finding.file}` : undefined,
+				`issue=${finding.issue}`,
+				`rationale=${finding.rationale}`,
+			].filter((part): part is string => Boolean(part)).join(" | ")).join("\n");
+			continuation.attempts.push({
+				attempt: writerAttempt,
+				action: "review",
+				reason: structuredReview ? `Independent review: ${structuredReview.status}${reviewFindings ? `\n${reviewFindings}` : ""}` : "Independent reviewer did not produce a valid result.",
+				executionState: review.executionState ?? "failed",
+				resultDisposition: review.resultDisposition ?? { status: "not-required" },
+				...(review.finalOutput ? { output: review.finalOutput } : {}),
+			});
+			if (!structuredReview) {
+				continuation.terminalReason = "parent-decision-required";
+				return "stop";
+			}
+			current.acceptance = await evaluateAcceptance({
+				acceptance: current.acceptance.effectiveAcceptance,
+				output: current.finalOutput ?? "",
+				cwd: options.cwd ?? runtimeCwd,
+				report: current.acceptance.childReport,
+				reviewResult: structuredReview,
+			});
+			current.resultDisposition = structuredReview.status === "blockers"
+				? { status: "rejected", source: "acceptance", reason: `Acceptance review found blockers:\n${reviewFindings ?? "(no findings provided)"}` }
+				: deriveResultDisposition({ acceptance: current.acceptance });
+			if (structuredReview.status === "needs-parent-decision") {
+				continuation.terminalReason = "parent-decision-required";
+				return "stop";
+			}
+			return structuredReview.status === "no-blockers" ? "accepted" : "rejected";
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+			continuation.currentAction = undefined;
+		}
+	};
+
+	if (result.resultDisposition.status === "review-required") {
+		const reviewed = await reviewResultFor(result, 1);
+		if (reviewed === "accepted") {
+			continuation.terminalReason = "accepted";
+			return result;
+		}
+		if (reviewed === "stop") return result;
+	}
+	if (maxAttempts <= 1 || !shouldContinueRejectedResult(options.continuation, effectiveAcceptance, result.resultDisposition)) {
+		continuation.terminalReason = "disabled";
+		return result;
+	}
+	if (hasNonIdempotentUncertainty(task)) {
+		continuation.terminalReason = "non-idempotent-uncertainty";
+		return result;
+	}
+	let current = result;
+	let previousSignature = continuation.attempts[0]?.signature;
+	for (let attemptNumber = 2; attemptNumber <= maxAttempts; attemptNumber++) {
+		if (options.reserveContinuationSpawn && !options.reserveContinuationSpawn()) {
+			continuation.terminalReason = "spawn-limit";
+			return current;
+		}
+		if (current.resultDisposition?.status !== "rejected") break;
+		const reason = current.resultDisposition.reason;
+		const continued = await runSync(runtimeCwd, agents, agentName, continuationFeedback(reason), {
+			...options,
+			sessionFile: current.sessionFile ?? result.sessionFile ?? options.sessionFile,
+			continuation: false,
+			reserveContinuationSpawn: undefined,
+		});
+		continued.continuation = continuation;
+		continued.controlEvents = [...(current.controlEvents ?? []), ...(continued.controlEvents ?? [])];
+		const continuedSignature = continued.resultDisposition?.status === "rejected" ? rejectionSignature(continued.resultDisposition) : undefined;
+		continuation.attempts.push({
+			attempt: attemptNumber,
+			action: "fix",
+			reason,
+			...(continuedSignature ? { signature: continuedSignature } : {}),
+			executionState: continued.executionState ?? "failed",
+			resultDisposition: continued.resultDisposition ?? { status: "not-required" },
+			...(continued.finalOutput ? { output: continued.finalOutput } : {}),
+		});
+		current = continued;
+		if (current.executionState !== "completed") {
+			continuation.terminalReason = "execution-not-completed";
+			return current;
+		}
+		if (current.resultDisposition?.status === "review-required") {
+			const reviewed = await reviewResultFor(current, attemptNumber);
+			if (reviewed === "accepted") {
+				continuation.terminalReason = "accepted";
+				return current;
+			}
+			if (reviewed === "stop") return current;
+		}
+		if (current.resultDisposition?.status === "accepted" || current.resultDisposition?.status === "not-required") {
+			continuation.terminalReason = "accepted";
+			return current;
+		}
+		if (previousSignature && previousSignature === continuedSignature) {
+			continuation.terminalReason = "identical-rejection";
+			return current;
+		}
+		previousSignature = continuedSignature;
+	}
+	continuation.terminalReason = "attempts-exhausted";
+	return current;
 }

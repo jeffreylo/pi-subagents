@@ -65,6 +65,9 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 			asyncId: run.id,
 			asyncDir: run.asyncDir,
 			status: run.state,
+			executionState: run.executionState,
+			resultDisposition: run.resultDisposition,
+			continuation: run.continuation,
 			sessionId: run.sessionId,
 			activityState: run.activityState,
 			lastActivityAt: run.lastActivityAt,
@@ -270,6 +273,9 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 					if (status) {
 						const previousStatus = job.status;
 						job.status = status.state;
+						job.executionState = status.executionState;
+						job.resultDisposition = status.resultDisposition;
+						job.continuation = status.continuation;
 						if (job.status !== "complete" && job.status !== "failed" && job.status !== "paused" && job.status !== "stopped") cancelCleanup(job.asyncId);
 						job.sessionId = status.sessionId ?? job.sessionId;
 						job.activityState = status.activityState;
@@ -383,7 +389,7 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 	};
 
 	const handleComplete = (data: unknown) => {
-		const result = data as { id?: string; success?: boolean; state?: AsyncJobState["status"]; asyncDir?: string; sessionId?: string; stopped?: boolean };
+		const result = data as { id?: string; success?: boolean; state?: AsyncJobState["status"]; executionState?: AsyncJobState["executionState"]; resultDisposition?: AsyncJobState["resultDisposition"]; continuation?: AsyncJobState["continuation"]; asyncDir?: string; sessionId?: string; stopped?: boolean };
 		if (typeof state.currentSessionId === "string" && result.sessionId !== state.currentSessionId) return;
 		const asyncId = result.id;
 		if (!asyncId) return;
@@ -391,6 +397,9 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 		let nestedRefreshFailed = false;
 		if (job) {
 			job.status = result.state ?? (result.success ? "complete" : "failed");
+			job.executionState = result.executionState ?? job.executionState;
+			job.resultDisposition = result.resultDisposition ?? job.resultDisposition;
+			job.continuation = result.continuation ?? job.continuation;
 			job.stopped = result.stopped ?? job.stopped;
 			job.updatedAt = Date.now();
 			if (result.asyncDir) job.asyncDir = result.asyncDir;

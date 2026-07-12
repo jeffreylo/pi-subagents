@@ -406,6 +406,50 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(mockPi.callCount(), 1);
 	});
 
+	it("reserves worst-case async continuation spawns against the session quota", async () => {
+		const ctx = makeMinimalCtx(tempDir);
+		const belowQuota = makeExecutor([makeAgent("echo")], { maxSubagentSpawnsPerSession: 3 });
+		const rejected = await belowQuota.execute(
+			"async-reservation-rejected",
+			{ agent: "echo", task: "First task", async: true },
+			new AbortController().signal,
+			undefined,
+			ctx,
+		);
+
+		assert.equal(rejected.isError, true);
+		assert.match(rejected.content[0]?.text ?? "", /Subagent spawn limit reached for this session \(1\/3 used, 3 requested\)/);
+		assert.equal(mockPi.callCount(), 0);
+
+		mockPi.onCall({ output: "sufficient reservation completed" });
+		const sufficientQuota = makeExecutor([makeAgent("echo")], { maxSubagentSpawnsPerSession: 4 });
+		const allowed = await sufficientQuota.execute(
+			"async-reservation-allowed",
+			{ agent: "echo", task: "Second task", async: true },
+			new AbortController().signal,
+			undefined,
+			ctx,
+		);
+		assert.equal(allowed.isError, undefined);
+
+		mockPi.onCall({ output: "disabled continuation completed" });
+		const baseOnlyQuota = makeExecutor([makeAgent("echo")], { maxSubagentSpawnsPerSession: 1 });
+		const baseOnly = await baseOnlyQuota.execute(
+			"async-reservation-disabled",
+			{ agent: "echo", task: "Third task", async: true, continuation: false },
+			new AbortController().signal,
+			undefined,
+			ctx,
+		);
+		assert.equal(baseOnly.isError, undefined);
+
+		const deadline = Date.now() + 10_000;
+		while (mockPi.callCount() < 2 && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+		assert.equal(mockPi.callCount(), 2);
+	});
+
 	it("allows management actions while an execution call is in progress", async () => {
 		mockPi.onCall({ output: "first call completed", delay: 100 });
 		const executor = makeExecutor([makeAgent("echo")]);
@@ -455,20 +499,25 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.deepEqual(result.details?.totalCost, { inputTokens: 100, outputTokens: 50, costUsd: 0.001 });
 	});
 
-	it("fails implementation runs that complete without mutation attempts", async () => {
+	it("keeps clean execution successful when completion guard rejects the result", async () => {
 		mockPi.onCall({ output: "Validation:\nlet rawFilename = params.filename.trim();" });
 		const agents = [makeAgent("worker")];
 		const controlEvents: Array<{ message: string }> = [];
 
 		const result = await runSync(tempDir, agents, "worker", "Implement the approved file changes", {
 			runId: "guard-run",
+			continuation: false,
 			onControlEvent: (event: { message: string }) => controlEvents.push(event),
 		});
 
-		assert.equal(result.exitCode, 1);
-		assert.match(result.error ?? "", /completed without making edits/);
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.executionState, "completed");
+		assert.equal(result.resultDisposition?.status, "rejected");
+		assert.equal(result.continuation?.terminalReason, "disabled");
+		assert.equal(mockPi.callCount(), 1);
+		assert.equal(result.error, undefined);
 		assert.equal(result.finalOutput, "Validation:\nlet rawFilename = params.filename.trim();");
-		assert.equal(result.progress.status, "failed");
+		assert.equal(result.progress.status, "completed");
 		assert.deepEqual(controlEvents.map((event) => event.message), [
 			"worker completed without making edits for an implementation task",
 		]);
@@ -477,7 +526,87 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		]);
 	});
 
-	it("returns captured output when the foreground executor fails an implementation run", async () => {
+	it("stops on an identical rejection signature after one continuation", async () => {
+		mockPi.onCall({ output: "I will implement this later." });
+		mockPi.onCall({ output: "I will implement this later." });
+		const result = await runSync(tempDir, [makeAgent("worker")], "worker", "Implement the approved fix", { runId: "guard-identical" });
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.resultDisposition?.status, "rejected");
+		assert.equal(result.continuation?.attempts.length, 2);
+		assert.equal(result.continuation?.terminalReason, "identical-rejection");
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("reports completion guard state from the final successful continuation attempt", async () => {
+		mockPi.onCall({ output: "I will implement this later." });
+		mockPi.onCall({
+			jsonl: [
+				{
+					type: "message_end",
+					message: {
+						role: "assistant",
+						content: [{ type: "toolCall", name: "edit", arguments: { path: "src/file.ts", oldText: "a", newText: "b" } }],
+						model: "mock/test-model",
+						stopReason: "toolUse",
+						usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } },
+					},
+				},
+				events.assistantMessage("Applied the requested fix."),
+			],
+		});
+
+		const result = await runSync(tempDir, [makeAgent("worker")], "worker", "Implement the approved fix", { runId: "guard-then-success" });
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.resultDisposition?.status, "accepted");
+		assert.notEqual(result.completionGuardTriggered, true);
+		assert.equal(result.continuation?.attempts[0]?.resultDisposition.status, "rejected");
+		assert.equal(result.continuation?.attempts[1]?.resultDisposition.status, "accepted");
+		assert.equal(result.continuation?.terminalReason, "accepted");
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("does not continue true execution failure or disabled continuation", async () => {
+		mockPi.onCall({ exitCode: 1, stderr: "provider failed" });
+		const failed = await runSync(tempDir, [makeAgent("worker")], "worker", "Implement fix", { runId: "no-retry-failure" });
+		assert.equal(failed.executionState, "failed");
+		assert.equal(failed.continuation?.terminalReason, "execution-not-completed");
+		assert.equal(mockPi.callCount(), 1);
+
+		mockPi.onCall({ output: "I will implement this later." });
+		const disabled = await runSync(tempDir, [makeAgent("worker")], "worker", "Implement fix", { runId: "no-retry-disabled", continuation: false });
+		assert.equal(disabled.resultDisposition?.status, "rejected");
+		assert.equal(disabled.continuation?.terminalReason, "disabled");
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("launches one structured independent reviewer and accepts no-blockers", async () => {
+		mockPi.onCall({ output: ["implemented", "```acceptance-report", JSON.stringify({ criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "implemented" }], changedFiles: ["src/a.ts"], testsAddedOrUpdated: ["test/a.test.ts"], commandsRun: [{ command: "test", result: "passed", summary: "passed" }], validationOutput: ["passed"], residualRisks: [], noStagedFiles: true }), "```"].join("\n") });
+		mockPi.onCall({ output: "reviewed", structuredOutput: { status: "no-blockers", findings: [] } });
+		const result = await runSync(tempDir, [makeAgent("worker", { completionGuard: false }), makeAgent("reviewer", { completionGuard: false })], "worker", "Implement reviewed fix", {
+			runId: "auto-review",
+			acceptance: { level: "reviewed" },
+		});
+		assert.equal(result.acceptance?.reviewResult?.status, "no-blockers", JSON.stringify({ acceptance: result.acceptance, continuation: result.continuation }));
+		assert.equal(result.resultDisposition?.status, "accepted", JSON.stringify(result.continuation));
+		assert.deepEqual(result.continuation?.attempts.map((attempt) => attempt.action), ["initial", "review"]);
+		assert.equal(result.continuation?.terminalReason, "accepted");
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("lets a standalone code-reviewer satisfy reviewed acceptance from its own findings", async () => {
+		mockPi.onCall({ output: ["review complete", "```acceptance-report", JSON.stringify({ reviewFindings: [], criteriaSatisfied: [{ id: "criterion-1", status: "satisfied", evidence: "reviewed" }], changedFiles: ["src/a.ts"], testsAddedOrUpdated: ["test/a.test.ts"], commandsRun: [{ command: "test", result: "passed", summary: "passed" }], validationOutput: ["passed"], residualRisks: [], noStagedFiles: true }), "```"].join("\n") });
+		const result = await runSync(tempDir, [makeAgent("code-reviewer", { completionGuard: false })], "code-reviewer", "Review the implementation", {
+			runId: "self-review",
+			acceptance: { level: "reviewed", review: false },
+		});
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.acceptance?.reviewResult?.status, "no-blockers", JSON.stringify({ acceptance: result.acceptance, continuation: result.continuation }));
+		assert.equal(result.resultDisposition?.status, "accepted");
+		assert.equal(mockPi.callCount(), 1);
+	});
+
+	it("returns actionable rejection and produced output without marking the tool call as an error", async () => {
 		mockPi.onCall({ output: "Oracle review:\n- finding one\n- finding two" });
 		const executor = makeExecutor([makeAgent("oracle")]);
 
@@ -490,9 +619,12 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		);
 
 		const text = result.content[0]?.text ?? "";
-		assert.equal(result.isError, true);
+		assert.equal(result.isError, undefined);
+		assert.equal(result.details.results[0]?.exitCode, 0);
+		assert.equal(result.details.results[0]?.executionState, "completed");
+		assert.equal(result.details.results[0]?.resultDisposition?.status, "rejected");
 		assert.match(text, /completed without making edits/);
-		assert.match(text, /Output:\nOracle review:\n- finding one\n- finding two/);
+		assert.match(text, /Produced output:\nOracle review:\n- finding one\n- finding two/);
 		assert.match(text, /Output artifact: /);
 	});
 
@@ -504,8 +636,9 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 			runId: "guard-future-tense",
 		});
 
-		assert.equal(result.exitCode, 1);
-		assert.match(result.error ?? "", /completed without making edits/);
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.resultDisposition?.status, "rejected");
+		assert.match(result.resultDisposition?.reason ?? "", /completed without making edits/);
 	});
 
 	it("allows declared read-only agents to mention implementation words without edits", async () => {
@@ -532,8 +665,9 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		const withoutOptOut = await runSync(tempDir, agents, "test-runner", "Patch the cold start test", {
 			runId: "guard-bash-conservative",
 		});
-		assert.equal(withoutOptOut.exitCode, 1);
-		assert.match(withoutOptOut.error ?? "", /completed without making edits/);
+		assert.equal(withoutOptOut.exitCode, 0);
+		assert.equal(withoutOptOut.resultDisposition?.status, "rejected");
+		assert.match(withoutOptOut.resultDisposition?.reason ?? "", /completed without making edits/);
 
 		const withOptOut = await runSync(tempDir, agents, "test-runner-optout", "Patch the cold start test", {
 			runId: "guard-bash-optout",

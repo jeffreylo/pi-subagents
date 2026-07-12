@@ -1128,6 +1128,7 @@ Agent definitions are not loaded into context by default. Management actions let
 | `share` | boolean | false | Upload session export to GitHub Gist. |
 | `sessionDir` | string | derived | Override session log directory. |
 | `acceptance` | string/object/false | inferred | Override the run's inferred acceptance gates. Use `"auto"`, `"attested"`, `"checked"`, `"verified"`, `"reviewed"`, or `{ level: "none", reason: "..." }`. |
+| `continuation` | object/false | `{ maxAttempts: 2 }` | Retry a rejected writer result with its actionable feedback. `maxAttempts` counts writer executions and is capped at 3; reviewer phases are bounded separately. Use `false` to opt out. |
 
 `context: "fork"` fails fast when the parent session is not persisted, the current leaf is missing, or the branched child session cannot be created. When the inherited transcript contains signed Anthropic `thinking` / `redacted_thinking` blocks, `pi-subagents` strips those provider-private blocks from the forked child session and forces the child run's thinking level to `off` so Anthropic does not reject modified signatures after branching or compaction. Forking never silently downgrades to `fresh`. In multi-agent runs that omit `context`, each agent/task/step follows its own `defaultContext`, so a fresh-default scout can run fresh beside a fork-default worker. Pass explicit `context: "fork"` or `context: "fresh"` when you intentionally want one context for every child.
 
@@ -1393,7 +1394,7 @@ Metadata records timing, usage, exit code, final model, attempted models, and fa
 
 Session files are stored under a per-run session directory. With `context: "fork"`, each child starts with `--session <branched-session-file>` produced from the parent’s current leaf. That is a real session fork, not an injected summary.
 
-Async completions notify only the originating session. The result watcher emits `subagent:async-complete`, and the extension consumes that event to render completion notifications. Successful sibling completions are held briefly and delivered as a single grouped message when they finish within a short window (see `completionBatch`); failed and paused completions always fire immediately.
+Async completions notify only the originating session. The result watcher emits `subagent:async-complete`, and the extension consumes that event to render completion notifications. Compact notifications show the actionable failure, rejection, or review-required reason first; produced child output remains available in the expanded notification. Successful sibling completions are held briefly and delivered as a single grouped message when they finish within a short window (see `completionBatch`); failed and paused completions always fire immediately.
 
 Async runs write:
 
@@ -1405,7 +1406,7 @@ Async runs write:
   subagent-log-<id>.md
 ```
 
-`status.json` powers the widget and `subagent({ action: "status" })` output. `events.jsonl` contains wrapper events plus child Pi JSON events annotated with run and step metadata, including `subagent.steer.requested` when live async steering is queued. Nested fanout status is stored as compact sidecar event/registry metadata and merged into parent status views and result/intercom payloads; full recursive status snapshots are not embedded in parent result files. `output-<n>.log` is a live human-readable tail. Fallback information is persisted so background runs are debuggable after completion.
+`status.json` powers the widget and `subagent({ action: "status" })` output. `events.jsonl` contains wrapper events plus child Pi JSON events annotated with run and step metadata, including `subagent.steer.requested` when live async steering is queued. Nested fanout status is stored as compact sidecar event/registry metadata and merged into parent status views and result/intercom payloads; full recursive status snapshots are not embedded in parent result files. `output-<n>.log` is a live human-readable tail. Fallback information is persisted so background runs are debuggable after completion. In result payloads, `success` and `exitCode` describe process execution only; inspect `resultDisposition` for `accepted`, `rejected`, or `review-required` outcomes.
 
 ## Acceptance Gates
 
@@ -1435,7 +1436,9 @@ Acceptance provenance is stored separately from child prose:
 - `reviewed`: an independent reviewer result is present.
 - `rejected`: attestation, structural checks, verification, or review failed.
 
-For `attested` or stricter levels, the child prompt includes a standardized acceptance section and asks for a fenced `acceptance-report` JSON block. Explicit failed gates fail the run. Inferred gates are persisted for observability without breaking older calls that omit `acceptance`.
+For `attested` or stricter levels, the child prompt includes a standardized acceptance section and asks for a fenced `acceptance-report` JSON block. Explicit failed gates reject the result without rewriting a clean process execution as a failure. Inferred gates are persisted for observability without breaking older calls that omit `acceptance`.
+
+Rejected writer results continue automatically with the exact rejection reason unless `continuation: false` is set. The default allows two writer executions and `maxAttempts` is capped at three; independent reviewer phases do not consume writer attempts and are bounded separately. Automatic continuation stops on execution failure, missing actionable feedback, an identical repeated rejection, uncertainty around non-idempotent work, exhausted attempts, or the session spawn limit.
 
 ## Live progress
 

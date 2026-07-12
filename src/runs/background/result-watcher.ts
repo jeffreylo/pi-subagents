@@ -4,8 +4,12 @@ import { buildCompletionKey, markSeenWithTtl } from "./completion-dedupe.ts";
 import { createFileCoalescer } from "../../shared/file-coalescer.ts";
 import {
 	SUBAGENT_ASYNC_COMPLETE_EVENT,
+	type AcceptanceLedger,
+	type ContinuationState,
+	type ExecutionState,
 	type IntercomEventBus,
 	type NestedRunSummary,
+	type ResultDisposition,
 	type SubagentResultIntercomChild,
 	type SubagentState,
 } from "../../shared/types.ts";
@@ -16,6 +20,7 @@ import {
 	deliverSubagentResultIntercomEvent,
 	resolveSubagentResultStatus,
 } from "../../intercom/result-intercom.ts";
+import { deriveExecutionState, deriveResultDisposition } from "../shared/outcome.ts";
 import { projectNestedRegistryForRoot, sanitizeSummary } from "../shared/nested-events.ts";
 
 const WATCHER_RESTART_DELAY_MS = 3000;
@@ -41,8 +46,16 @@ type ResultFileChild = {
 	error?: string;
 	success?: boolean;
 	state?: string;
+	exitCode?: number | null;
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
+	continuation?: ContinuationState;
+	interrupted?: boolean;
+	timedOut?: boolean;
+	turnBudgetExceeded?: boolean;
 	stopped?: boolean;
-	acceptance?: SubagentResultIntercomChild["acceptance"];
+	completionGuardTriggered?: boolean;
+	acceptance?: AcceptanceLedger;
 	sessionFile?: string;
 	artifactPaths?: { outputPath?: string };
 	intercomTarget?: string;
@@ -55,6 +68,13 @@ type ResultFileData = {
 	agent?: string;
 	success?: boolean;
 	state?: string;
+	exitCode?: number | null;
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
+	continuation?: ContinuationState;
+	timedOut?: boolean;
+	turnBudgetExceeded?: boolean;
+	stopped?: boolean;
 	mode?: string;
 	summary?: string;
 	results?: ResultFileChild[];
@@ -148,30 +168,53 @@ export function createResultWatcher(
 					agent: data.agent,
 					output: data.summary,
 					success: data.success,
+					state: data.state,
+					exitCode: data.exitCode,
+					executionState: data.executionState,
+					resultDisposition: data.resultDisposition,
+					continuation: data.continuation,
+					timedOut: data.timedOut,
+					turnBudgetExceeded: data.turnBudgetExceeded,
+					stopped: data.stopped,
 				}];
 			const normalizedChildren = attachNestedChildrenToResultChildren(runId, resultChildren.map((result = {}, index): SubagentResultIntercomChild => {
 				const baseOutput = result.output ?? data.summary;
 				const hasRealOutput = typeof baseOutput === "string" && baseOutput.trim().length > 0;
 				const output = hasRealOutput ? baseOutput : "(no output)";
-				const summary = result.success === false && result.error
-					? `${result.error}${hasRealOutput ? `\n\nOutput:\n${baseOutput}` : ""}`
-					: output;
 				const sessionPath = result.sessionFile ?? (resultChildren.length === 1 ? data.sessionFile : undefined);
 				const childNestedChildren = sanitizeNestedResultChildren(result.children, resultPath, `results[${index}].children`);
-				const childState = result.state === "paused" || result.state === "stopped"
-					? result.state
-					: result.stopped === true
-						? "stopped"
-						: data.state === "paused" || (!hasResultChildren && (data.state === "stopped" || typeof result.success !== "boolean"))
-							? data.state
-							: undefined;
+				const resultDisposition = deriveResultDisposition({
+					resultDisposition: result.resultDisposition,
+					completionGuardTriggered: result.completionGuardTriggered,
+					acceptance: result.acceptance,
+				});
+				const unsuccessfulDisposition = resultDisposition.status === "rejected" || resultDisposition.status === "review-required";
+				const summary = result.success === false && result.error && !unsuccessfulDisposition
+					? `${result.error}${hasRealOutput ? `\n\nOutput:\n${baseOutput}` : ""}`
+					: output;
+				const legacyPolicyRejection = result.executionState === undefined
+					&& (result.completionGuardTriggered === true || result.acceptance?.status === "rejected")
+					&& result.exitCode !== 0;
+				const executionState = deriveExecutionState({
+					executionState: result.executionState,
+					exitCode: legacyPolicyRejection ? 0 : result.exitCode,
+					success: legacyPolicyRejection ? true : result.success,
+					state: legacyPolicyRejection ? "complete" : result.state ?? (data.state === "paused" ? "paused" : typeof result.success === "boolean" ? undefined : data.state),
+					interrupted: result.interrupted,
+					timedOut: result.timedOut,
+					turnBudgetExceeded: result.turnBudgetExceeded,
+					stopped: result.stopped,
+				});
 				return {
 					agent: result.agent ?? data.agent ?? `step-${index + 1}`,
 					status: resolveSubagentResultStatus({
-						success: result.success,
-						state: childState,
+						executionState,
+						resultDisposition,
 					}),
 					summary,
+					executionState,
+					resultDisposition,
+					continuation: result.continuation,
 					...(result.acceptance ? { acceptance: { status: result.acceptance.status } } : {}),
 					index,
 					artifactPath: result.artifactPaths?.outputPath,
@@ -212,6 +255,9 @@ export function createResultWatcher(
 							agent: child.agent,
 							status: child.status,
 							summary: child.summary,
+							executionState: child.executionState,
+							resultDisposition: child.resultDisposition,
+							continuation: child.continuation,
 							index: child.index,
 							artifactPath: child.artifactPath,
 							sessionPath: child.sessionPath,

@@ -16,8 +16,11 @@ import {
 	type AsyncParallelGroupStatus,
 	type AsyncStatus,
 	type ChainOutputMap,
+	type ContinuationState,
 	type CostSummary,
+	type ExecutionState,
 	type ModelAttempt,
+	type ResultDisposition,
 	type NestedRouteInfo,
 	type NestedRunSummary,
 	type ResolvedControlConfig,
@@ -89,7 +92,9 @@ import {
 import { resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { writeInitialProgressFile } from "../../shared/settings.ts";
 import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
-import { acceptanceFailureMessage, aggregateAcceptanceReport, evaluateAcceptance, formatAcceptancePrompt, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { acceptanceFailureMessage, acceptanceReviewFromChildReport, aggregateAcceptanceReport, evaluateAcceptance, formatAcceptancePrompt, parseAcceptanceReport, stripAcceptanceReport } from "../shared/acceptance.ts";
+import { ACCEPTANCE_REVIEW_RESULT_SCHEMA, continuationFeedback, hasNonIdempotentUncertainty, initialContinuationState, parseAcceptanceReviewResult, rejectionSignature, resolveContinuationMaxAttempts, shouldContinueRejectedResult } from "../shared/continuation.ts";
+import { aggregateResultDisposition, COMPLETION_GUARD_REJECTION_REASON, deriveExecutionState, deriveResultDisposition } from "../shared/outcome.ts";
 import { waitForImportedAsyncRoot } from "./chain-root-attachment.ts";
 import { appendRunnerStepsToStatus, consumeChainAppendRequests, countPendingChainAppendRequests } from "./chain-append.ts";
 import { appendTurnBudgetSystemPrompt, formatTurnBudgetOutput, initialTurnBudgetState, shouldAbortForTurnBudget, turnBudgetExceededMessage, turnBudgetSoftNote, turnBudgetState } from "../shared/turn-budget.ts";
@@ -108,6 +113,7 @@ import {
 interface SubagentRunConfig {
 	id: string;
 	steps: RunnerStep[];
+	reviewerSteps?: Record<string, SubagentStep>;
 	resultPath: string;
 	cwd: string;
 	placeholder: string;
@@ -146,6 +152,9 @@ interface StepResult {
 	output: string;
 	error?: string;
 	success: boolean;
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
+	continuation?: ContinuationState;
 	exitCode?: number | null;
 	skipped?: boolean;
 	interrupted?: boolean;
@@ -171,6 +180,7 @@ interface StepResult {
 	structuredOutputPath?: string;
 	structuredOutputSchemaPath?: string;
 	acceptance?: import("../../shared/types.ts").AcceptanceLedger;
+	completionGuardTriggered?: boolean;
 	watchdog?: import("../../shared/types.ts").ChildWatchdogProgress;
 }
 
@@ -888,6 +898,7 @@ interface SingleStepContext {
 	childIntercomTarget?: string;
 	orchestratorIntercomTarget?: string;
 	nestedRoute?: NestedRouteInfo;
+	reviewerSteps?: Record<string, SubagentStep>;
 	onAttemptStart?: (attempt: { model?: string; thinking?: string }) => void;
 	onChildEvent?: (event: ChildEvent) => void;
 	skipAcceptance?: () => boolean;
@@ -897,34 +908,7 @@ interface SingleStepContext {
 async function runSingleStep(
 	step: SubagentStep,
 	ctx: SingleStepContext,
-): Promise<{
-	agent: string;
-	output: string;
-	exitCode: number | null;
-	error?: string;
-	model?: string;
-	attemptedModels?: string[];
-	modelAttempts?: ModelAttempt[];
-	artifactPaths?: ArtifactPaths;
-	artifactError?: string;
-	transcriptPath?: string;
-	transcriptError?: string;
-	interrupted?: boolean;
-	timedOut?: boolean;
-	stopped?: boolean;
-	turnBudget?: TurnBudgetState;
-	turnBudgetExceeded?: boolean;
-	wrapUpRequested?: boolean;
-	toolBudget?: ToolBudgetState;
-	toolBudgetBlocked?: boolean;
-	sessionFile?: string;
-	intercomTarget?: string;
-	completionGuardTriggered?: boolean;
-	structuredOutput?: unknown;
-	structuredOutputPath?: string;
-	structuredOutputSchemaPath?: string;
-	acceptance?: import("../../shared/types.ts").AcceptanceLedger;
-}> {
+): Promise<StepResult> {
 	if (step.importAsyncRoot) {
 		let importTimedOut = false;
 		let importStopped = false;
@@ -1163,12 +1147,7 @@ async function runSingleStep(
 			})
 			: undefined;
 		const completionGuardTriggered = completionGuard?.triggered === true && !run.observedMutationAttempt;
-		const completionGuardError = completionGuardTriggered
-			? "Subagent completed without making edits for an implementation task.\nIt appears to have returned planning or scratchpad output instead of applying changes."
-			: undefined;
-		const effectiveExitCode = completionGuardTriggered
-			? 1
-			: structuredError
+		const effectiveExitCode = structuredError
 				? 1
 				: hiddenError?.hasError
 				? (hiddenError.exitCode ?? 1)
@@ -1177,8 +1156,7 @@ async function runSingleStep(
 					: run.error && run.exitCode === 0
 						? 1
 						: run.exitCode;
-		const error = completionGuardError
-			?? structuredError
+		const error = structuredError
 			?? (hiddenError?.hasError
 				? hiddenError.details
 					? `${hiddenError.errorType} failed (exit ${effectiveExitCode}): ${hiddenError.details}`
@@ -1239,6 +1217,9 @@ async function runSingleStep(
 		saveError: resolvedOutput.saveError,
 	});
 	outputForSummary = finalizedOutput.displayOutput;
+	const selfReviewResult = /(?:^|[-_.])(?:code-)?reviewer(?:$|[-_.])/i.test(step.agent)
+		? acceptanceReviewFromChildReport(parseAcceptanceReport(outputForAcceptance).report)
+		: undefined;
 	const acceptance = step.effectiveAcceptance && !finalResult?.stopped && !finalResult?.turnBudgetExceeded && !ctx.timeoutSignal?.aborted && !ctx.stopSignal?.aborted && !ctx.skipAcceptance?.()
 		? await evaluateAcceptance({
 			acceptance: step.effectiveAcceptance,
@@ -1246,24 +1227,26 @@ async function runSingleStep(
 			cwd: step.cwd ?? ctx.cwd,
 			signal: combinedAbortSignal([ctx.timeoutSignal, ctx.stopSignal]),
 			abortMessage: ctx.stopSignal?.aborted ? ctx.stopMessage ?? "Subagent stopped by user." : ctx.timeoutMessage ?? "Subagent timed out.",
+			...(selfReviewResult ? { reviewResult: selfReviewResult } : {}),
 		})
 		: undefined;
 	const stoppedAfterAcceptance = finalResult?.stopped === true || ctx.stopSignal?.aborted === true;
 	const timedOutAfterAcceptance = !stoppedAfterAcceptance && (finalResult?.timedOut === true || ctx.timeoutSignal?.aborted === true);
 	const turnBudgetExceeded = finalResult?.turnBudgetExceeded === true;
 	const effectiveAcceptance = timedOutAfterAcceptance || stoppedAfterAcceptance || turnBudgetExceeded ? undefined : acceptance;
-	const acceptanceFailure = effectiveAcceptance ? acceptanceFailureMessage(effectiveAcceptance) : undefined;
-	const acceptanceCanFailRun = acceptanceFailure && effectiveAcceptance?.explicit && (finalResult?.exitCode ?? 1) === 0 && !finalResult?.interrupted && !timedOutAfterAcceptance && !stoppedAfterAcceptance && !turnBudgetExceeded;
-	const effectiveFinalExitCode = timedOutAfterAcceptance || stoppedAfterAcceptance || turnBudgetExceeded ? 1 : acceptanceCanFailRun ? 1 : finalResult?.exitCode ?? 1;
+	const completionGuardDisposition: ResultDisposition | undefined = completionGuardTriggeredFinal
+		? { status: "rejected", source: "completion-guard", reason: COMPLETION_GUARD_REJECTION_REASON }
+		: undefined;
+	const acceptanceDisposition = effectiveAcceptance ? deriveResultDisposition({ acceptance: effectiveAcceptance }) : undefined;
+	const resultDisposition = completionGuardDisposition ?? acceptanceDisposition ?? { status: "not-required" as const };
+	const effectiveFinalExitCode = timedOutAfterAcceptance || stoppedAfterAcceptance || turnBudgetExceeded ? 1 : finalResult?.exitCode ?? 1;
 	const effectiveFinalError = stoppedAfterAcceptance
 		? ctx.stopMessage ?? "Subagent stopped by user."
 		: timedOutAfterAcceptance
 			? ctx.timeoutMessage ?? "Subagent timed out."
 			: turnBudgetExceeded
 				? finalResult?.error ?? (turnBudget ? turnBudgetExceededMessage(turnBudget, turnBudget.turnCount) : "Subagent exceeded turn budget.")
-				: acceptanceCanFailRun
-					? (finalResult?.error ? `${finalResult.error}\n${acceptanceFailure}` : acceptanceFailure)
-					: finalResult?.error;
+				: finalResult?.error;
 
 	if (artifactPaths && ctx.artifactConfig?.enabled !== false) {
 		if (ctx.artifactConfig?.includeOutput !== false) {
@@ -1276,6 +1259,8 @@ async function runSingleStep(
 				agent: step.agent,
 				task,
 				exitCode: effectiveFinalExitCode,
+				executionState: deriveExecutionState({ exitCode: effectiveFinalExitCode, timedOut: timedOutAfterAcceptance, stopped: stoppedAfterAcceptance, turnBudgetExceeded }),
+				resultDisposition,
 				model: finalResult?.model,
 				attemptedModels: attemptedModels.length > 0 ? attemptedModels : undefined,
 				modelAttempts,
@@ -1291,10 +1276,20 @@ async function runSingleStep(
 
 	const artifactError = artifactErrors.length > 0 ? artifactErrors.join("\n") : undefined;
 
-	return {
+	const executionState = deriveExecutionState({
+		exitCode: effectiveFinalExitCode,
+		interrupted: finalResult?.interrupted,
+		timedOut: timedOutAfterAcceptance,
+		stopped: stoppedAfterAcceptance,
+		turnBudgetExceeded,
+	});
+
+	const result: StepResult = {
 		agent: step.agent,
 		output: outputForSummary,
 		exitCode: effectiveFinalExitCode,
+		executionState,
+		resultDisposition,
 		error: effectiveFinalError,
 		sessionFile: step.sessionFile,
 		intercomTarget: ctx.childIntercomTarget,
@@ -1321,6 +1316,130 @@ async function runSingleStep(
 		acceptance: effectiveAcceptance,
 		watchdog: finalResult?.watchdog,
 	};
+
+	const maxAttempts = resolveContinuationMaxAttempts(step.continuation);
+	const continuation = initialContinuationState(maxAttempts, {
+		executionState: result.executionState,
+		resultDisposition: result.resultDisposition,
+		finalOutput: result.output,
+	});
+	result.continuation = continuation;
+	if (result.executionState !== "completed") {
+		continuation.terminalReason = "execution-not-completed";
+		return result;
+	}
+	if (result.resultDisposition?.status === "accepted" || result.resultDisposition?.status === "not-required") {
+		continuation.terminalReason = "accepted";
+		return result;
+	}
+	const reviewCurrent = async (current: StepResult, writerAttempt: number): Promise<"accepted" | "rejected" | "stop"> => {
+		if (!current.acceptance || current.resultDisposition?.status !== "review-required") return "stop";
+		const reviewerName = current.acceptance.effectiveAcceptance.review && current.acceptance.effectiveAcceptance.review !== false
+			? current.acceptance.effectiveAcceptance.review.agent ?? "reviewer"
+			: "reviewer";
+		const reviewerStep = ctx.reviewerSteps?.[reviewerName];
+		if (!reviewerStep) {
+			continuation.terminalReason = "parent-decision-required";
+			return "stop";
+		}
+		const reviewDir = fs.mkdtempSync(path.join(ctx.sessionDir ?? ctx.cwd, ".review-"));
+		const schemaPath = path.join(reviewDir, "review.schema.json");
+		const outputPath = path.join(reviewDir, "review.json");
+		fs.writeFileSync(schemaPath, JSON.stringify(ACCEPTANCE_REVIEW_RESULT_SCHEMA), "utf-8");
+		try {
+			continuation.currentAction = "review";
+			const review = await runSingleStep({
+				...reviewerStep,
+				task: `Independently review the actual cwd/diff and evidence for ${step.agent}. Do not edit files. Use structured_output. Mark product/scope/architecture choices needs-parent-decision.\n\nEvidence:\n${current.output}`,
+				sessionFile: undefined,
+				continuation: false,
+				effectiveAcceptance: undefined,
+				structuredOutput: { schema: ACCEPTANCE_REVIEW_RESULT_SCHEMA, schemaPath, outputPath },
+			}, { ...ctx, outputFile: path.join(reviewDir, "review.log"), flatIndex: ctx.flatIndex });
+			const structuredReview = review.executionState === "completed" ? parseAcceptanceReviewResult(review.structuredOutput) : undefined;
+			const findings = structuredReview?.findings.map((finding) => [finding.severity, finding.file ? `file=${finding.file}` : undefined, `issue=${finding.issue}`, `rationale=${finding.rationale}`].filter((part): part is string => Boolean(part)).join(" | ")).join("\n");
+			continuation.attempts.push({ attempt: writerAttempt, action: "review", reason: structuredReview ? `Independent review: ${structuredReview.status}${findings ? `\n${findings}` : ""}` : "Independent reviewer did not produce a valid result.", executionState: review.executionState ?? "failed", resultDisposition: review.resultDisposition ?? { status: "not-required" }, ...(review.output ? { output: review.output } : {}) });
+			if (!structuredReview) {
+				continuation.terminalReason = "parent-decision-required";
+				return "stop";
+			}
+			current.acceptance = await evaluateAcceptance({ acceptance: current.acceptance.effectiveAcceptance, output: current.output, cwd: step.cwd ?? ctx.cwd, report: current.acceptance.childReport, reviewResult: structuredReview });
+			current.resultDisposition = structuredReview.status === "blockers"
+				? { status: "rejected", source: "acceptance", reason: `Acceptance review found blockers:\n${findings ?? "(no findings provided)"}` }
+				: deriveResultDisposition({ acceptance: current.acceptance });
+			if (structuredReview.status === "needs-parent-decision") {
+				continuation.terminalReason = "parent-decision-required";
+				return "stop";
+			}
+			return structuredReview.status === "no-blockers" ? "accepted" : "rejected";
+		} finally {
+			fs.rmSync(reviewDir, { recursive: true, force: true });
+			continuation.currentAction = undefined;
+		}
+	};
+
+	if (result.resultDisposition?.status === "review-required") {
+		const reviewed = await reviewCurrent(result, 1);
+		if (reviewed === "accepted") {
+			continuation.terminalReason = "accepted";
+			return result;
+		}
+		if (reviewed === "stop") return result;
+	}
+	if (maxAttempts <= 1 || !shouldContinueRejectedResult(step.continuation, step.effectiveAcceptance, result.resultDisposition ?? { status: "not-required" })) {
+		continuation.terminalReason = "disabled";
+		return result;
+	}
+	if (hasNonIdempotentUncertainty(task)) {
+		continuation.terminalReason = "non-idempotent-uncertainty";
+		return result;
+	}
+
+	let current = result;
+	let previousSignature = result.resultDisposition?.status === "rejected" ? rejectionSignature(result.resultDisposition) : undefined;
+	for (let attemptNumber = 2; attemptNumber <= maxAttempts; attemptNumber++) {
+		if (current.resultDisposition?.status !== "rejected") break;
+		const reason = current.resultDisposition.reason;
+		const continued = await runSingleStep(
+			{ ...step, task: continuationFeedback(reason), continuation: false },
+			{ ...ctx, reviewerSteps: undefined },
+		);
+		const signature = continued.resultDisposition?.status === "rejected" ? rejectionSignature(continued.resultDisposition) : undefined;
+		continuation.attempts.push({
+			attempt: attemptNumber,
+			action: "fix",
+			reason,
+			...(signature ? { signature } : {}),
+			executionState: continued.executionState ?? "failed",
+			resultDisposition: continued.resultDisposition ?? { status: "not-required" },
+			...(continued.output ? { output: continued.output } : {}),
+		});
+		continued.continuation = continuation;
+		current = continued;
+		if (current.executionState !== "completed") {
+			continuation.terminalReason = "execution-not-completed";
+			return current;
+		}
+		if (current.resultDisposition?.status === "review-required") {
+			const reviewed = await reviewCurrent(current, attemptNumber);
+			if (reviewed === "accepted") {
+				continuation.terminalReason = "accepted";
+				return current;
+			}
+			if (reviewed === "stop") return current;
+		}
+		if (current.resultDisposition?.status === "accepted" || current.resultDisposition?.status === "not-required") {
+			continuation.terminalReason = "accepted";
+			return current;
+		}
+		if (previousSignature && previousSignature === signature) {
+			continuation.terminalReason = "identical-rejection";
+			return current;
+		}
+		previousSignature = signature;
+	}
+	continuation.terminalReason = "attempts-exhausted";
+	return current;
 }
 
 type RunnerStatusStep = NonNullable<AsyncStatus["steps"]>[number] & {
@@ -2597,6 +2716,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					childIntercomTarget: config.childIntercomTargets?.[fi],
 					orchestratorIntercomTarget: config.controlIntercomTarget,
 					nestedRoute: config.nestedRoute,
+					reviewerSteps: config.reviewerSteps,
 					registerInterrupt: (interrupt) => registerStepInterrupt(fi, interrupt),
 					registerTimeout: (interrupt) => registerStepTimeout(fi, interrupt),
 					registerStop: (stop) => registerStepStop(fi, stop),
@@ -2641,6 +2761,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				statusPayload.steps[fi].structuredOutput = singleResult.structuredOutput;
 				statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
 				statusPayload.steps[fi].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
+				statusPayload.steps[fi].executionState = singleResult.executionState;
+				statusPayload.steps[fi].resultDisposition = singleResult.resultDisposition;
+				statusPayload.steps[fi].continuation = singleResult.continuation;
 				statusPayload.steps[fi].acceptance = singleResult.acceptance;
 				statusPayload.steps[fi].watchdog = singleResult.watchdog;
 				statusPayload.lastUpdate = taskEndTime;
@@ -2684,6 +2807,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					structuredOutput: pr.structuredOutput,
 					structuredOutputPath: pr.structuredOutputPath,
 					structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
+					executionState: pr.executionState,
+					resultDisposition: pr.resultDisposition,
+					continuation: pr.continuation,
 					acceptance: pr.acceptance,
 					watchdog: pr.watchdog,
 				});
@@ -2898,6 +3024,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 							childIntercomTarget: config.childIntercomTargets?.[fi],
 							orchestratorIntercomTarget: config.controlIntercomTarget,
 							nestedRoute: config.nestedRoute,
+							reviewerSteps: config.reviewerSteps,
 							registerInterrupt: (interrupt) => registerStepInterrupt(fi, interrupt),
 							registerTimeout: (interrupt) => registerStepTimeout(fi, interrupt),
 							registerStop: (stop) => registerStepStop(fi, stop),
@@ -2948,6 +3075,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						statusPayload.steps[fi].structuredOutput = singleResult.structuredOutput;
 						statusPayload.steps[fi].structuredOutputPath = singleResult.structuredOutputPath;
 						statusPayload.steps[fi].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
+						statusPayload.steps[fi].executionState = singleResult.executionState;
+						statusPayload.steps[fi].resultDisposition = singleResult.resultDisposition;
+						statusPayload.steps[fi].continuation = singleResult.continuation;
 						statusPayload.steps[fi].acceptance = singleResult.acceptance;
 						statusPayload.steps[fi].watchdog = singleResult.watchdog;
 						statusPayload.lastUpdate = taskEndTime;
@@ -3027,6 +3157,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 						structuredOutput: pr.structuredOutput,
 						structuredOutputPath: pr.structuredOutputPath,
 						structuredOutputSchemaPath: pr.structuredOutputSchemaPath,
+						executionState: pr.executionState,
+						resultDisposition: pr.resultDisposition,
+						continuation: pr.continuation,
 						acceptance: pr.acceptance,
 						watchdog: pr.watchdog,
 					});
@@ -3105,6 +3238,7 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				childIntercomTarget: config.childIntercomTargets?.[flatIndex],
 				orchestratorIntercomTarget: config.controlIntercomTarget,
 				nestedRoute: config.nestedRoute,
+				reviewerSteps: config.reviewerSteps,
 				registerInterrupt: (interrupt) => registerStepInterrupt(flatIndex, interrupt),
 				registerTimeout: (interrupt) => registerStepTimeout(flatIndex, interrupt),
 				registerStop: (stop) => registerStepStop(flatIndex, stop),
@@ -3143,6 +3277,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				structuredOutput: singleResult.structuredOutput,
 				structuredOutputPath: singleResult.structuredOutputPath,
 				structuredOutputSchemaPath: singleResult.structuredOutputSchemaPath,
+				executionState: singleResult.executionState,
+				resultDisposition: singleResult.resultDisposition,
+				continuation: singleResult.continuation,
 				acceptance: singleResult.acceptance,
 				watchdog: singleResult.watchdog,
 				interrupted: singleResult.interrupted,
@@ -3214,6 +3351,9 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.steps[flatIndex].structuredOutput = singleResult.structuredOutput;
 			statusPayload.steps[flatIndex].structuredOutputPath = singleResult.structuredOutputPath;
 			statusPayload.steps[flatIndex].structuredOutputSchemaPath = singleResult.structuredOutputSchemaPath;
+			statusPayload.steps[flatIndex].executionState = singleResult.executionState;
+			statusPayload.steps[flatIndex].resultDisposition = singleResult.resultDisposition;
+			statusPayload.steps[flatIndex].continuation = singleResult.continuation;
 			statusPayload.steps[flatIndex].acceptance = singleResult.acceptance;
 			statusPayload.steps[flatIndex].watchdog = singleResult.watchdog;
 			if (stepTokens) {
@@ -3348,6 +3488,18 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			statusPayload.error = `Step failed: ${failedStep.agent}`;
 		}
 	}
+	const executionState = deriveExecutionState({
+		exitCode: stopped || timedOut || turnBudgetExceeded ? 1 : interrupted || results.every((result) => result.success) ? 0 : 1,
+		stopped,
+		timedOut,
+		turnBudgetExceeded,
+		interrupted,
+	});
+	const resultDisposition = aggregateResultDisposition(results.map((result) => result.resultDisposition));
+	const continuation = results.map((result) => result.continuation).filter((state): state is ContinuationState => Boolean(state)).sort((left, right) => right.attempts.length - left.attempts.length)[0];
+	statusPayload.executionState = executionState;
+	statusPayload.resultDisposition = resultDisposition;
+	statusPayload.continuation = continuation;
 	writeStatusPayload();
 	appendJsonl(
 		eventsPath,
@@ -3387,8 +3539,11 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 			id,
 			agent: agentName,
 			mode: resultMode,
-			success: !stopped && !timedOut && !turnBudgetExceeded && !interrupted && results.every((r) => r.success),
+			success: executionState === "completed",
 			state: stopped ? "stopped" : timedOut || turnBudgetExceeded ? "failed" : interrupted ? "paused" : results.every((r) => r.success) ? "complete" : "failed",
+			executionState,
+			resultDisposition,
+			continuation,
 			summary: stopped ? stopMessage : timedOut ? (timeoutMessage ?? "Subagent timed out.") : turnBudgetExceeded ? (statusPayload.error ?? "Subagent exceeded turn budget.") : interrupted ? "Paused after interrupt. Waiting for explicit next action." : summary,
 			...(config.timeoutMs !== undefined ? { timeoutMs: config.timeoutMs } : {}),
 			...(config.deadlineAt !== undefined ? { deadlineAt: config.deadlineAt } : {}),
@@ -3426,12 +3581,15 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 				structuredOutput: r.structuredOutput,
 				structuredOutputPath: r.structuredOutputPath,
 				structuredOutputSchemaPath: r.structuredOutputSchemaPath,
+				executionState: r.executionState,
+				resultDisposition: r.resultDisposition,
+				continuation: r.continuation,
 				acceptance: r.acceptance,
 				watchdog: r.watchdog,
 			})),
 			outputs,
 			workflowGraph: statusPayload.workflowGraph,
-			exitCode: stopped || timedOut || turnBudgetExceeded ? 1 : interrupted || results.every((r) => r.success) ? 0 : 1,
+			exitCode: executionState === "completed" || executionState === "paused" ? 0 : 1,
 			timestamp: runEndedAt,
 			durationMs: runEndedAt - overallStartTime,
 			totalTokens: statusPayload.totalTokens,

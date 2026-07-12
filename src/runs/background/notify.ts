@@ -16,22 +16,88 @@ import {
 	createCompletionBatcher,
 	resolveCompletionBatchConfig,
 } from "./completion-batcher.ts";
-import { SUBAGENT_ASYNC_COMPLETE_EVENT, type SubagentState } from "../../shared/types.ts";
+import { SUBAGENT_ASYNC_COMPLETE_EVENT, type AcceptanceLedger, type ContinuationState, type ExecutionState, type ResultDisposition, type SubagentState } from "../../shared/types.ts";
+import { aggregateResultDisposition, deriveExecutionState, deriveResultDisposition } from "../shared/outcome.ts";
 
 interface ChainStepResult {
 	agent: string;
 	output: string;
+	error?: string;
 	success: boolean;
 }
 
 export interface SubagentNotifyDetails {
 	agent: string;
-	status: "completed" | "failed" | "paused";
+	status: "completed" | "failed" | "timed-out" | "budget-exceeded" | "rejected" | "review-required" | "paused" | "stopped" | "detached";
 	taskInfo?: string;
 	resultPreview: string;
+	producedOutput?: string;
+	resultDispositionStatus?: "rejected" | "review-required";
 	durationMs?: number;
 	sessionLabel?: string;
 	sessionValue?: string;
+}
+
+export function parseSubagentNotifyContent(content: string): SubagentNotifyDetails | undefined {
+	const lines = content.split("\n");
+	const header = lines[0] ?? "";
+	const groupedMatch = header.match(/^Background task(?:s completed| results) \((\d+)\):\s*(.*)$/);
+	if (groupedMatch) {
+		const count = Number(groupedMatch[1]);
+		const summary = groupedMatch[2]?.trim() ?? "";
+		let status: SubagentNotifyDetails["status"] = "completed";
+		if (header.startsWith("Background task results")) {
+			status = /\bfailed\b/.test(summary)
+				? "failed"
+				: /\btimed out\b/.test(summary)
+					? "timed-out"
+					: /\bbudget exceeded\b/.test(summary)
+						? "budget-exceeded"
+						: /\breview required\b/.test(summary)
+							? "review-required"
+							: /\brejected\b/.test(summary)
+								? "rejected"
+								: "failed";
+		}
+		const groupedBody = lines.slice(2);
+		if (/^\d+\.\s+\S/.test(groupedBody[0] ?? "")) groupedBody.shift();
+		return {
+			agent: `${count} background ${count === 1 ? "task" : "tasks"}`,
+			status,
+			resultPreview: groupedBody.join("\n").trim() || summary || "(no output)",
+		};
+	}
+	const match = header.match(/^Background task (completed|failed|timed-out|budget-exceeded|rejected|review-required|paused|stopped|detached): \*\*(.+?)\*\*(?:\s+(\([^)]*\)))?$/);
+	if (!match) return undefined;
+	const body = lines.slice(2);
+	let sessionIndex = -1;
+	for (let i = body.length - 1; i >= 1; i--) {
+		if (body[i - 1]?.trim() === "" && /^(Session|Session file|Session share error):\s+/.test(body[i]!)) {
+			sessionIndex = i;
+			break;
+		}
+	}
+	const sessionLine = sessionIndex >= 0 ? body[sessionIndex] : undefined;
+	const resultLines = sessionIndex >= 0 ? body.slice(0, sessionIndex) : body;
+	const producedOutputIndex = resultLines.findIndex((line) => line === "Produced output:");
+	const resultPreviewLines = producedOutputIndex >= 0 ? resultLines.slice(0, producedOutputIndex) : resultLines;
+	const producedOutput = producedOutputIndex >= 0 ? resultLines.slice(producedOutputIndex + 1).join("\n").trim() : undefined;
+	const resultPreview = resultPreviewLines.join("\n").trim() || "(no output)";
+	let sessionLabel: string | undefined;
+	let sessionValue: string | undefined;
+	if (sessionLine) {
+		const separator = sessionLine.indexOf(":");
+		sessionLabel = sessionLine.slice(0, separator).toLowerCase();
+		sessionValue = sessionLine.slice(separator + 1).trim();
+	}
+	return {
+		agent: match[2]!,
+		status: match[1] as SubagentNotifyDetails["status"],
+		...(match[3] ? { taskInfo: match[3] } : {}),
+		resultPreview,
+		...(producedOutput ? { producedOutput } : {}),
+		...(sessionLabel && sessionValue ? { sessionLabel, sessionValue } : {}),
+	};
 }
 
 interface SubagentResult {
@@ -39,8 +105,14 @@ interface SubagentResult {
 	agent: string | null;
 	success: boolean;
 	summary: string;
+	error?: string;
 	exitCode?: number;
 	state?: string;
+	executionState?: ExecutionState;
+	resultDisposition?: ResultDisposition;
+	acceptance?: AcceptanceLedger;
+	continuation?: ContinuationState;
+	results?: Array<ChainStepResult & { executionState?: ExecutionState; resultDisposition?: ResultDisposition; continuation?: ContinuationState; acceptance?: AcceptanceLedger }>;
 	timestamp: number;
 	durationMs?: number;
 	cwd?: string;
@@ -48,7 +120,6 @@ interface SubagentResult {
 	shareUrl?: string;
 	gistUrl?: string;
 	shareError?: string;
-	results?: ChainStepResult[];
 	taskIndex?: number;
 	totalTasks?: number;
 	sessionId?: string | null;
@@ -76,6 +147,8 @@ export function formatSingleCompletion(details: SubagentNotifyDetails): string {
 		`Background task ${details.status}: **${details.agent}**${details.taskInfo ?? ""}`,
 		"",
 		details.resultPreview.trim() ? details.resultPreview : "(no output)",
+		details.producedOutput?.trim() ? "" : undefined,
+		details.producedOutput?.trim() ? `Produced output:\n${details.producedOutput.trim()}` : undefined,
 		sessionLine ? "" : undefined,
 		sessionLine,
 	]
@@ -84,7 +157,24 @@ export function formatSingleCompletion(details: SubagentNotifyDetails): string {
 }
 
 export function formatGroupedCompletion(details: SubagentNotifyDetails[]): string {
-	const header = `Background tasks completed (${details.length}): ${details.map((d) => `**${d.agent}**${d.taskInfo ?? ""}`).join(", ")}`;
+	const allCompleted = details.every((detail) => detail.status === "completed");
+	const counts = new Map<SubagentNotifyDetails["status"], number>();
+	for (const detail of details) counts.set(detail.status, (counts.get(detail.status) ?? 0) + 1);
+	const rejected = details.filter((detail) => detail.status === "rejected" || detail.resultDispositionStatus === "rejected").length;
+	const reviewRequired = details.filter((detail) => detail.status === "review-required" || detail.resultDispositionStatus === "review-required").length;
+	const countParts = [
+		counts.get("failed") ? `${counts.get("failed")} failed` : undefined,
+		counts.get("timed-out") ? `${counts.get("timed-out")} timed out` : undefined,
+		counts.get("budget-exceeded") ? `${counts.get("budget-exceeded")} budget exceeded` : undefined,
+		rejected ? `${rejected} rejected` : undefined,
+		reviewRequired ? `${reviewRequired} review required` : undefined,
+		counts.get("paused") ? `${counts.get("paused")} paused` : undefined,
+		counts.get("stopped") ? `${counts.get("stopped")} stopped` : undefined,
+		counts.get("detached") ? `${counts.get("detached")} detached` : undefined,
+	].filter((part): part is string => Boolean(part));
+	const header = allCompleted
+		? `Background tasks completed (${details.length}): ${details.map((d) => `**${d.agent}**${d.taskInfo ?? ""}`).join(", ")}`
+		: `Background task results (${details.length}): ${countParts.length > 0 ? countParts.join(", ") : `${details.length} results`}`;
 	const blocks: string[] = [header, ""];
 	for (let index = 0; index < details.length; index++) {
 		const detail = details[index];
@@ -92,6 +182,7 @@ export function formatGroupedCompletion(details: SubagentNotifyDetails[]): strin
 		const sessionLine = formatSessionLine(detail);
 		blocks.push(`${index + 1}. ${detail.agent}${detail.taskInfo ?? ""}`);
 		blocks.push(detail.resultPreview.trim() ? detail.resultPreview : "(no output)");
+		if (detail.producedOutput?.trim()) blocks.push(`Produced output:\n${detail.producedOutput.trim()}`);
 		if (sessionLine) blocks.push(sessionLine);
 		blocks.push("");
 	}
@@ -123,12 +214,39 @@ function completionBatchKey(result: SubagentResult): string {
 export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDetails {
 	const agent = result.agent ?? "unknown";
 	const summary = typeof result.summary === "string" ? result.summary : "";
-	const paused = !result.success && (
-		result.exitCode === 0
-		|| result.state === "paused"
-		|| summary.startsWith("Paused after interrupt.")
-	);
-	const status = paused ? "paused" : result.success ? "completed" : "failed";
+	const executionState = deriveExecutionState({
+		executionState: result.executionState,
+		exitCode: result.exitCode,
+		success: result.success,
+		state: result.state,
+	});
+	const resultDisposition = aggregateResultDisposition([
+		deriveResultDisposition({ resultDisposition: result.resultDisposition, acceptance: result.acceptance }),
+		...(result.results ?? []).map((child) => deriveResultDisposition(child)),
+	]);
+	const status = executionState !== "completed"
+		? executionState
+		: resultDisposition.status === "review-required"
+			? "review-required"
+			: resultDisposition.status === "rejected"
+				? "rejected"
+				: "completed";
+	const unsuccessfulDisposition = resultDisposition.status === "rejected" || resultDisposition.status === "review-required";
+	const failedChildError = result.results?.find((child) => child.success === false && child.error)?.error;
+	const executionReason = result.error?.trim() || failedChildError?.trim() || summary;
+	const continuation = result.continuation ?? result.results?.find((child) => child.continuation)?.continuation;
+	const writerAttempts = continuation?.attempts.filter((attempt) => attempt.action !== "review").reduce((max, attempt) => Math.max(max, attempt.attempt), 0) ?? 0;
+	const acceptedAfterContinuation = executionState === "completed" && continuation?.terminalReason === "accepted" && writerAttempts > 1;
+	const resultPreview = executionState === "completed" && unsuccessfulDisposition
+		? `${writerAttempts > 1 ? `Rejected after ${writerAttempts} attempts: ` : ""}${resultDisposition.reason}`
+		: acceptedAfterContinuation
+			? `Accepted after ${writerAttempts} attempts.\n\n${summary}`
+			: continuation?.currentAction === "review"
+				? `Reviewing result.\n\n${executionReason}`
+				: executionReason;
+	const producedOutput = unsuccessfulDisposition || (!acceptedAfterContinuation && summary.trim() && summary.trim() !== resultPreview.trim())
+		? summary
+		: undefined;
 
 	const taskInfo =
 		result.taskIndex !== undefined && result.totalTasks !== undefined
@@ -148,7 +266,9 @@ export function buildCompletionDetails(result: SubagentResult): SubagentNotifyDe
 		agent,
 		status,
 		...(taskInfo ? { taskInfo } : {}),
-		resultPreview: summary,
+		resultPreview,
+		...(producedOutput ? { producedOutput } : {}),
+		...(unsuccessfulDisposition ? { resultDispositionStatus: resultDisposition.status } : {}),
 		...(typeof result.durationMs === "number" ? { durationMs: result.durationMs } : {}),
 		...(session ? { sessionLabel: session.label, sessionValue: session.value } : {}),
 	};

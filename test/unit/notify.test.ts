@@ -5,6 +5,7 @@ import registerSubagentNotify, {
 	buildCompletionDetails,
 	formatGroupedCompletion,
 	formatSingleCompletion,
+	parseSubagentNotifyContent,
 	type RegisterSubagentNotifyOptions,
 	type SubagentNotifyDetails,
 } from "../../src/runs/background/notify.ts";
@@ -303,6 +304,116 @@ describe("completion formatting helpers", () => {
 			+ "1. alpha\nalpha done\n\n"
 			+ "2. beta (1/2)\n(no output)\nSession: https://share/abc",
 		);
+	});
+
+	it("parses grouped result notifications with an actionable first preview and nonblank fallback header", () => {
+		const parsed = parseSubagentNotifyContent([
+			"Background task results (2): 1 rejected, 1 review required",
+			"",
+			"1. worker",
+			"Acceptance rejected: focused tests failed",
+			"Produced output:",
+			"partial patch",
+			"",
+			"2. reviewer",
+			"Independent review is required.",
+		].join("\n"));
+
+		assert.equal(parsed?.agent, "2 background tasks");
+		assert.notEqual(parsed?.agent.trim(), "");
+		assert.equal(parsed?.status, "review-required");
+		assert.match(parsed?.resultPreview ?? "", /^Acceptance rejected: focused tests failed/);
+		assert.doesNotMatch(parsed?.resultPreview ?? "", /^1\. worker/);
+
+		const fallback = parseSubagentNotifyContent("Background task results (1): 1 review required\n\n");
+		assert.equal(fallback?.agent, "1 background task");
+		assert.equal(fallback?.resultPreview, "1 review required");
+	});
+
+	it("renders actionable rejection and review reasons before produced output", () => {
+		const rejected = buildCompletionDetails({
+			id: "rejected",
+			agent: "worker",
+			success: true,
+			executionState: "completed",
+			resultDisposition: { status: "rejected", source: "acceptance", reason: "Acceptance rejected: tests failed" },
+			summary: "child output",
+			timestamp: 1,
+		});
+		assert.equal(rejected.status, "rejected");
+		assert.equal(rejected.resultDispositionStatus, "rejected");
+		assert.equal(formatSingleCompletion(rejected), "Background task rejected: **worker**\n\nAcceptance rejected: tests failed\n\nProduced output:\nchild output");
+
+		const failedWithRejection = buildCompletionDetails({
+			id: "failed-rejected",
+			agent: "worker",
+			success: false,
+			executionState: "failed",
+			resultDisposition: { status: "rejected", source: "acceptance", reason: "Acceptance rejected: tests failed" },
+			error: "Provider process exited with code 1",
+			summary: "partial child output",
+			timestamp: 1,
+		});
+		assert.equal(failedWithRejection.status, "failed");
+		assert.equal(failedWithRejection.resultDispositionStatus, "rejected");
+		assert.equal(failedWithRejection.resultPreview, "Provider process exited with code 1");
+		assert.equal(formatSingleCompletion(failedWithRejection), "Background task failed: **worker**\n\nProvider process exited with code 1\n\nProduced output:\npartial child output");
+
+		const grouped = formatGroupedCompletion([
+			failedWithRejection,
+			{ agent: "rejected", status: "rejected", resultPreview: "policy rejected", producedOutput: "patch" },
+			{ agent: "reviewer", status: "review-required", resultPreview: "independent review missing", producedOutput: "findings" },
+		]);
+		assert.match(grouped, /^Background task results \(3\): 1 failed, 2 rejected, 1 review required/);
+		assert.match(grouped, /1\. worker\nProvider process exited with code 1\nProduced output:\npartial child output/);
+		assert.match(grouped, /2\. rejected\npolicy rejected\nProduced output:\npatch/);
+		assert.match(grouped, /3\. reviewer\nindependent review missing\nProduced output:\nfindings/);
+	});
+
+	it("reports accepted continuation attempts and rejection reasons before child output", () => {
+		const accepted = buildCompletionDetails({
+			id: "accepted-after-continuation",
+			agent: "worker",
+			success: true,
+			executionState: "completed",
+			resultDisposition: { status: "accepted", source: "acceptance", reason: "Acceptance satisfied." },
+			continuation: {
+				maxAttempts: 2,
+				terminalReason: "accepted",
+				attempts: [
+					{ attempt: 1, action: "initial", executionState: "completed", resultDisposition: { status: "rejected", source: "acceptance", reason: "Missing evidence." } },
+					{ attempt: 2, action: "fix", executionState: "completed", resultDisposition: { status: "accepted", source: "acceptance", reason: "Acceptance satisfied." } },
+				],
+			},
+			summary: "validated patch",
+			timestamp: 1,
+		});
+		assert.equal(formatSingleCompletion(accepted), "Background task completed: **worker**\n\nAccepted after 2 attempts.\n\nvalidated patch");
+
+		for (const terminalReason of ["attempts-exhausted", "identical-rejection"] as const) {
+			const reason = terminalReason === "attempts-exhausted" ? "Criterion still fails." : "The same rejection recurred.";
+			const rejected = buildCompletionDetails({
+				id: terminalReason,
+				agent: "worker",
+				success: true,
+				executionState: "completed",
+				resultDisposition: { status: "rejected", source: "acceptance", reason },
+				continuation: {
+					maxAttempts: 2,
+					terminalReason,
+					attempts: [
+						{ attempt: 1, action: "initial", executionState: "completed", resultDisposition: { status: "rejected", source: "acceptance", reason } },
+						{ attempt: 2, action: "fix", executionState: "completed", resultDisposition: { status: "rejected", source: "acceptance", reason } },
+					],
+				},
+				summary: "child output",
+				timestamp: 1,
+			});
+			assert.equal(
+				formatSingleCompletion(rejected),
+				`Background task rejected: **worker**\n\nRejected after 2 attempts: ${reason}\n\nProduced output:\nchild output`,
+			);
+		}
 	});
 
 	it("buildCompletionDetails derives paused status from state and summary", () => {
